@@ -125,6 +125,7 @@ void Application::renderFrame(f32 alpha)
     if (frame.cmd && frame.swapchain) {
         m_imgui.prepare(frame.cmd);              // copy pass, must precede the render passes
         m_renderer.uploadPendingData(frame.cmd); // skinned meshes, overlay lines
+        onRenderOffscreen(frame, m_renderer);
 
         if (m_desc.presentScene) {
             m_renderer.resizeSceneTarget(frame.width, frame.height);

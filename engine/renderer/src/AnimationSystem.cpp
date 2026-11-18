@@ -22,37 +22,61 @@ void addCross(std::vector<DebugVertex>& out, const glm::vec3& p, f32 size, const
 
 } // namespace
 
-entt::entity createAnimatedEntity(scene::Scene& scene, Renderer& renderer,
-                                  std::shared_ptr<const anim::SkinnedModel> model, std::string name,
-                                  const glm::vec4& tint)
+bool enableAnimation(scene::Scene& scene, Renderer& renderer, entt::entity entity,
+                     std::shared_ptr<const anim::SkinnedModel> model)
 {
-    if (!model) {
-        return entt::null;
+    auto& registry = scene.registry();
+    auto* meshRenderer = registry.valid(entity) ? registry.try_get<scene::MeshRendererComponent>(entity) : nullptr;
+    if (!model || !meshRenderer) {
+        return false;
     }
-    const scene::MeshId mesh = renderer.addMesh(name, model->skin.mesh, MeshUsage::Dynamic);
-    if (mesh == Renderer::kInvalidMesh) {
-        return entt::null;
+    disableAnimation(scene, renderer, entity); // switching models: drop the old instance first
+
+    const scene::MeshId instance = renderer.addMesh(model->name, model->skin.mesh, MeshUsage::Dynamic);
+    if (instance == Renderer::kInvalidMesh) {
+        return false;
     }
-    const entt::entity entity = scene.createMesh(std::move(name), mesh, tint);
-    auto& animator = scene.registry().emplace<scene::AnimatorComponent>(entity);
+    auto& animator = registry.emplace<scene::AnimatorComponent>(entity);
+    animator.restMesh = meshRenderer->mesh;
+    meshRenderer->mesh = instance;
     animator.model = std::move(model);
     if (!animator.model->clips.empty()) {
         animator.player.play(0);
     }
-    return entity;
+    return true;
 }
 
-void destroyEntity(scene::Scene& scene, Renderer& renderer, entt::entity entity)
+void disableAnimation(scene::Scene& scene, Renderer& renderer, entt::entity entity)
 {
     auto& registry = scene.registry();
     if (!registry.valid(entity)) {
         return;
     }
-    if (registry.all_of<scene::AnimatorComponent>(entity)) {
-        if (const auto* meshRenderer = registry.try_get<scene::MeshRendererComponent>(entity)) {
-            renderer.removeMesh(meshRenderer->mesh);
-        }
+    const auto* animator = registry.try_get<scene::AnimatorComponent>(entity);
+    if (!animator) {
+        return;
     }
+    if (auto* meshRenderer = registry.try_get<scene::MeshRendererComponent>(entity)) {
+        renderer.removeMesh(meshRenderer->mesh);
+        meshRenderer->mesh = animator->restMesh;
+    }
+    registry.remove<scene::AnimatorComponent>(entity);
+}
+
+void removeMesh(scene::Scene& scene, Renderer& renderer, entt::entity entity)
+{
+    disableAnimation(scene, renderer, entity);
+    if (scene.registry().valid(entity)) {
+        scene.registry().remove<scene::MeshRendererComponent>(entity);
+    }
+}
+
+void destroyEntity(scene::Scene& scene, Renderer& renderer, entt::entity entity)
+{
+    if (!scene.registry().valid(entity)) {
+        return;
+    }
+    disableAnimation(scene, renderer, entity);
     scene.destroyEntity(entity);
 }
 
@@ -80,7 +104,7 @@ void updateAnimations(scene::Scene& scene, Renderer& renderer, f32 dt)
         anim::computeSkinningMatrices(model.skeleton, a.jointModel, a.skinMatrices);
 
         const auto* meshRenderer = scene.registry().try_get<scene::MeshRendererComponent>(entity);
-        if (!meshRenderer || !meshRenderer->visible) {
+        if (!meshRenderer) {
             continue;
         }
         const usize vertexCount = model.skin.mesh.positions.size();
@@ -96,34 +120,39 @@ void appendSkeletonLines(const scene::Scene& scene, std::vector<DebugVertex>& ou
 {
     const auto view = scene.registry().view<const scene::AnimatorComponent, const scene::TransformComponent>();
     for (const entt::entity entity : view) {
-        const auto& [a, transform] = view.get(entity);
-        if (!a.model || a.jointModel.size() != a.model->skeleton.jointCount()) {
+        const auto& [animator, transform] = view.get(entity);
+        appendSkeletonLines(animator, transform.matrix(), out, entity == highlightEntity ? highlightJoint : -1);
+    }
+}
+
+void appendSkeletonLines(const scene::AnimatorComponent& a, const glm::mat4& world, std::vector<DebugVertex>& out,
+                         i32 highlightJoint)
+{
+    if (!a.model || a.jointModel.size() != a.model->skeleton.jointCount()) {
+        return;
+    }
+    const anim::SkinnedModel& model = *a.model;
+    const auto& parents = model.skeleton.parents();
+
+    // Marker size relative to the model, so tiny and huge rigs both stay readable.
+    const glm::vec3 scale(glm::length(glm::vec3(world[0])), glm::length(glm::vec3(world[1])), glm::length(glm::vec3(world[2])));
+    const glm::vec3 extent = model.restBoundsMax - model.restBoundsMin;
+    const f32 markerSize = std::max(glm::length(extent * scale) * 0.012f, 0.004f);
+
+    for (usize j = 0; j < a.jointModel.size(); ++j) {
+        if (!model.jointIsBone(j)) {
             continue;
         }
-        const anim::SkinnedModel& model = *a.model;
-        const glm::mat4 world = transform.matrix();
-        const auto& parents = model.skeleton.parents();
+        const glm::vec3 p = glm::vec3(world * a.jointModel[j][3]);
+        const bool highlighted = static_cast<i32>(j) == highlightJoint;
+        addCross(out, p, highlighted ? markerSize * 2.5f : markerSize, highlighted ? kHighlightColor : kJointColor);
 
-        // Marker size relative to the model, so tiny and huge rigs both stay readable.
-        const glm::vec3 extent = model.restBoundsMax - model.restBoundsMin;
-        const f32 markerSize = std::max(glm::length(extent * transform.scale) * 0.012f, 0.004f);
-
-        for (usize j = 0; j < a.jointModel.size(); ++j) {
-            if (!model.jointIsBone(j)) {
-                continue;
-            }
-            const glm::vec3 p = glm::vec3(world * a.jointModel[j][3]);
-            const bool highlighted = entity == highlightEntity && static_cast<i32>(j) == highlightJoint;
-            addCross(out, p, highlighted ? markerSize * 2.5f : markerSize, highlighted ? kHighlightColor : kJointColor);
-
-            const i32 parent = parents[j];
-            if (parent != anim::kNoParent && model.jointIsBone(static_cast<usize>(parent))) {
-                const glm::vec3 q = glm::vec3(world * a.jointModel[static_cast<usize>(parent)][3]);
-                const bool parentHighlighted = entity == highlightEntity && parent == highlightJoint;
-                const glm::vec3 color = highlighted || parentHighlighted ? kHighlightColor : kBoneColor;
-                out.push_back({q, color});
-                out.push_back({p, color});
-            }
+        const i32 parent = parents[j];
+        if (parent != anim::kNoParent && model.jointIsBone(static_cast<usize>(parent))) {
+            const glm::vec3 q = glm::vec3(world * a.jointModel[static_cast<usize>(parent)][3]);
+            const glm::vec3 color = highlighted || parent == highlightJoint ? kHighlightColor : kBoneColor;
+            out.push_back({q, color});
+            out.push_back({p, color});
         }
     }
 }

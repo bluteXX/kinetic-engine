@@ -57,7 +57,7 @@ void skinVertices(const SkinnedMesh& skin, std::span<const glm::mat4> skinMatric
     }
 }
 
-void computeRestBounds(SkinnedModel& model)
+MeshData skinnedRestMesh(const SkinnedModel& model)
 {
     const usize joints = model.skeleton.jointCount();
     std::vector<glm::mat4> world(joints);
@@ -67,8 +67,15 @@ void computeRestBounds(SkinnedModel& model)
 
     MeshData posed;
     posed.positions.resize(model.skin.mesh.positions.size());
-    std::vector<glm::vec3> normals(posed.positions.size());
-    skinVertices(model.skin, skin, posed.positions, normals);
+    posed.normals.resize(posed.positions.size());
+    posed.indices = model.skin.mesh.indices;
+    skinVertices(model.skin, skin, posed.positions, posed.normals);
+    return posed;
+}
+
+void computeRestBounds(SkinnedModel& model)
+{
+    const MeshData posed = skinnedRestMesh(model);
     model.restBoundsMin = posed.boundsMin();
     model.restBoundsMax = posed.boundsMax();
 }

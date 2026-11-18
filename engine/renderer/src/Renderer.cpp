@@ -241,6 +241,8 @@ scene::MeshId Renderer::addMesh(std::string name, const MeshData& data, MeshUsag
         uploadBuffer(m_device->handle(), SDL_GPU_BUFFERUSAGE_INDEX, std::as_bytes(std::span(data.indices)));
     mesh.indexCount = static_cast<u32>(data.indices.size());
     mesh.vertexCount = static_cast<u32>(vertices.size());
+    mesh.positions = data.positions;
+    mesh.indices = data.indices;
     mesh.boundsMin = data.boundsMin();
     mesh.boundsMax = data.boundsMax();
     if (usage == MeshUsage::Dynamic) {
@@ -298,47 +300,56 @@ void Renderer::removeMesh(scene::MeshId id)
     mesh.indexBuffer = nullptr;
     mesh.staging = nullptr;
     mesh.uploadPending = false;
+    mesh.positions = {};
+    mesh.indices = {};
 }
 
-void Renderer::setOverlayLines(std::vector<DebugVertex> lines)
+void Renderer::setOverlayLines(std::vector<DebugVertex> lines, u32 layer)
 {
-    m_overlayLines = std::move(lines);
-    m_overlayDirty = true;
+    if (layer >= m_overlays.size()) {
+        m_overlays.resize(layer + 1);
+    }
+    m_overlays[layer].lines = std::move(lines);
+    m_overlays[layer].dirty = true;
 }
 
 void Renderer::uploadPendingData(SDL_GPUCommandBuffer* cmd)
 {
     SDL_GPUDevice* gpu = m_device->handle();
 
-    // Grow the overlay buffers if needed and stage the lines.
-    const auto overlayCount = static_cast<u32>(m_overlayLines.size());
+    // Grow each layer's buffers if needed and stage its lines.
     bool uploadOverlay = false;
-    if (m_overlayDirty) {
-        m_overlayDirty = false;
-        m_overlayVertexCount = 0;
-        if (overlayCount > m_overlayCapacity) {
-            if (m_overlayBuffer) SDL_ReleaseGPUBuffer(gpu, m_overlayBuffer);
-            if (m_overlayStaging) SDL_ReleaseGPUTransferBuffer(gpu, m_overlayStaging);
-            m_overlayCapacity = std::max(overlayCount, m_overlayCapacity * 2);
-            const auto bytes = static_cast<Uint32>(m_overlayCapacity * sizeof(DebugVertex));
+    for (OverlayLayer& layer : m_overlays) {
+        if (!layer.dirty) {
+            continue;
+        }
+        layer.dirty = false;
+        layer.vertexCount = 0;
+        const auto count = static_cast<u32>(layer.lines.size());
+        if (count > layer.capacity) {
+            if (layer.buffer) SDL_ReleaseGPUBuffer(gpu, layer.buffer);
+            if (layer.staging) SDL_ReleaseGPUTransferBuffer(gpu, layer.staging);
+            layer.capacity = std::max(count, layer.capacity * 2);
+            const auto bytes = static_cast<Uint32>(layer.capacity * sizeof(DebugVertex));
             SDL_GPUBufferCreateInfo bufferInfo{};
             bufferInfo.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
             bufferInfo.size = bytes;
-            m_overlayBuffer = SDL_CreateGPUBuffer(gpu, &bufferInfo);
+            layer.buffer = SDL_CreateGPUBuffer(gpu, &bufferInfo);
             SDL_GPUTransferBufferCreateInfo stagingInfo{};
             stagingInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
             stagingInfo.size = bytes;
-            m_overlayStaging = SDL_CreateGPUTransferBuffer(gpu, &stagingInfo);
-            if (!m_overlayBuffer || !m_overlayStaging) {
+            layer.staging = SDL_CreateGPUTransferBuffer(gpu, &stagingInfo);
+            if (!layer.buffer || !layer.staging) {
                 KN_ERROR("Overlay line buffers: {}", SDL_GetError());
-                m_overlayCapacity = 0;
+                layer.capacity = 0;
             }
         }
-        if (overlayCount > 0 && overlayCount <= m_overlayCapacity) {
-            void* mapped = SDL_MapGPUTransferBuffer(gpu, m_overlayStaging, true);
-            if (mapped) {
-                std::memcpy(mapped, m_overlayLines.data(), overlayCount * sizeof(DebugVertex));
-                SDL_UnmapGPUTransferBuffer(gpu, m_overlayStaging);
+        if (count > 0 && count <= layer.capacity) {
+            if (void* mapped = SDL_MapGPUTransferBuffer(gpu, layer.staging, true)) {
+                std::memcpy(mapped, layer.lines.data(), count * sizeof(DebugVertex));
+                SDL_UnmapGPUTransferBuffer(gpu, layer.staging);
+                layer.vertexCount = count;
+                layer.uploadPending = true;
                 uploadOverlay = true;
             }
         }
@@ -360,30 +371,29 @@ void Renderer::uploadPendingData(SDL_GPUCommandBuffer* cmd)
         SDL_UploadToGPUBuffer(copy, &src, &dst, true);
     }
     if (uploadOverlay) {
-        const SDL_GPUTransferBufferLocation src{m_overlayStaging, 0};
-        const SDL_GPUBufferRegion dst{m_overlayBuffer, 0, static_cast<Uint32>(overlayCount * sizeof(DebugVertex))};
-        SDL_UploadToGPUBuffer(copy, &src, &dst, true);
-        m_overlayVertexCount = overlayCount;
+        for (OverlayLayer& layer : m_overlays) {
+            if (layer.uploadPending) {
+                layer.uploadPending = false;
+                const SDL_GPUTransferBufferLocation src{layer.staging, 0};
+                const SDL_GPUBufferRegion dst{layer.buffer, 0, static_cast<Uint32>(layer.vertexCount * sizeof(DebugVertex))};
+                SDL_UploadToGPUBuffer(copy, &src, &dst, true);
+            }
+        }
     }
     SDL_EndGPUCopyPass(copy);
 }
 
-bool Renderer::resizeSceneTarget(u32 width, u32 height)
+bool Renderer::resizeTarget(RenderTarget& target, u32 width, u32 height)
 {
     if (width == 0 || height == 0) {
-        return m_sceneColor != nullptr;
+        return target.valid();
     }
-    if (m_sceneColor && m_sceneWidth == width && m_sceneHeight == height) {
+    if (target.valid() && target.width == width && target.height == height) {
         return true;
     }
-    SDL_GPUDevice* gpu = m_device->handle();
-    if (m_sceneColor) SDL_ReleaseGPUTexture(gpu, m_sceneColor);
-    if (m_sceneDepth) SDL_ReleaseGPUTexture(gpu, m_sceneDepth);
-    m_sceneColor = nullptr;
-    m_sceneDepth = nullptr;
-    m_sceneWidth = 0;
-    m_sceneHeight = 0;
+    releaseTarget(target);
 
+    SDL_GPUDevice* gpu = m_device->handle();
     SDL_GPUTextureCreateInfo info{};
     info.type = SDL_GPU_TEXTURETYPE_2D;
     info.width = width;
@@ -393,24 +403,30 @@ bool Renderer::resizeSceneTarget(u32 width, u32 height)
 
     info.format = kSceneColorFormat;
     info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
-    m_sceneColor = SDL_CreateGPUTexture(gpu, &info);
+    target.color = SDL_CreateGPUTexture(gpu, &info);
 
     info.format = m_depthFormat;
     info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
-    m_sceneDepth = SDL_CreateGPUTexture(gpu, &info);
+    target.depth = SDL_CreateGPUTexture(gpu, &info);
 
-    if (!m_sceneColor || !m_sceneDepth) {
-        KN_ERROR("Failed to create scene target {}x{}: {}", width, height, SDL_GetError());
+    if (!target.color || !target.depth) {
+        KN_ERROR("Failed to create render target {}x{}: {}", width, height, SDL_GetError());
+        releaseTarget(target);
         return false;
     }
-    m_sceneWidth = width;
-    m_sceneHeight = height;
+    target.width = width;
+    target.height = height;
     return true;
 }
 
-f32 Renderer::sceneAspect() const
+void Renderer::releaseTarget(RenderTarget& target)
 {
-    return m_sceneHeight > 0 ? static_cast<f32>(m_sceneWidth) / static_cast<f32>(m_sceneHeight) : 1.0f;
+    // Safe mid-frame: SDL_GPU defers the release until the GPU is done with the textures.
+    if (m_device) {
+        if (target.color) SDL_ReleaseGPUTexture(m_device->handle(), target.color);
+        if (target.depth) SDL_ReleaseGPUTexture(m_device->handle(), target.depth);
+    }
+    target = {};
 }
 
 void Renderer::shutdown()
@@ -425,18 +441,14 @@ void Renderer::shutdown()
         if (mesh.staging) SDL_ReleaseGPUTransferBuffer(gpu, mesh.staging);
     }
     m_meshes.clear();
-    if (m_overlayBuffer) SDL_ReleaseGPUBuffer(gpu, m_overlayBuffer);
-    if (m_overlayStaging) SDL_ReleaseGPUTransferBuffer(gpu, m_overlayStaging);
-    m_overlayBuffer = nullptr;
-    m_overlayStaging = nullptr;
-    m_overlayCapacity = 0;
-    m_overlayVertexCount = 0;
+    for (OverlayLayer& layer : m_overlays) {
+        if (layer.buffer) SDL_ReleaseGPUBuffer(gpu, layer.buffer);
+        if (layer.staging) SDL_ReleaseGPUTransferBuffer(gpu, layer.staging);
+    }
+    m_overlays.clear();
     if (m_gridBuffer) SDL_ReleaseGPUBuffer(gpu, m_gridBuffer);
     m_gridBuffer = nullptr;
-    if (m_sceneColor) SDL_ReleaseGPUTexture(gpu, m_sceneColor);
-    if (m_sceneDepth) SDL_ReleaseGPUTexture(gpu, m_sceneDepth);
-    m_sceneColor = nullptr;
-    m_sceneDepth = nullptr;
+    releaseTarget(m_sceneTarget);
     for (SDL_GPUGraphicsPipeline** p : {&m_trianglePipeline, &m_meshPipeline, &m_linePipeline, &m_overlayLinePipeline}) {
         if (*p) SDL_ReleaseGPUGraphicsPipeline(gpu, *p);
         *p = nullptr;
@@ -446,17 +458,23 @@ void Renderer::shutdown()
 
 SDL_GPURenderPass* Renderer::beginScenePass(SDL_GPUCommandBuffer* cmd, const glm::vec4& clearColor)
 {
-    if (!m_sceneColor) {
+    return beginTargetPass(cmd, m_sceneTarget, clearColor);
+}
+
+SDL_GPURenderPass* Renderer::beginTargetPass(SDL_GPUCommandBuffer* cmd, const RenderTarget& target,
+                                             const glm::vec4& clearColor)
+{
+    if (!target.valid()) {
         return nullptr;
     }
     SDL_GPUColorTargetInfo color{};
-    color.texture = m_sceneColor;
+    color.texture = target.color;
     color.clear_color = SDL_FColor{clearColor.r, clearColor.g, clearColor.b, 1.0f};
     color.load_op = SDL_GPU_LOADOP_CLEAR;
     color.store_op = SDL_GPU_STOREOP_STORE;
 
     SDL_GPUDepthStencilTargetInfo depth{};
-    depth.texture = m_sceneDepth;
+    depth.texture = target.depth;
     depth.clear_depth = 1.0f;
     depth.load_op = SDL_GPU_LOADOP_CLEAR;
     depth.store_op = SDL_GPU_STOREOP_DONT_CARE;
@@ -468,13 +486,13 @@ SDL_GPURenderPass* Renderer::beginScenePass(SDL_GPUCommandBuffer* cmd, const glm
 
 void Renderer::blitSceneToSwapchain(const gfx::Frame& frame)
 {
-    if (!m_sceneColor || !frame.swapchain) {
+    if (!m_sceneTarget.valid() || !frame.swapchain) {
         return;
     }
     SDL_GPUBlitInfo blit{};
-    blit.source.texture = m_sceneColor;
-    blit.source.w = m_sceneWidth;
-    blit.source.h = m_sceneHeight;
+    blit.source.texture = m_sceneTarget.color;
+    blit.source.w = m_sceneTarget.width;
+    blit.source.h = m_sceneTarget.height;
     blit.destination.texture = frame.swapchain;
     blit.destination.w = frame.width;
     blit.destination.h = frame.height;
@@ -510,7 +528,8 @@ void Renderer::drawScene(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, con
     const auto& registry = scene.registry();
     const auto& camera = registry.get<scene::CameraComponent>(cameraEntity);
     const auto& cameraTransform = registry.get<scene::TransformComponent>(cameraEntity);
-    const glm::mat4 viewProjection = camera.projection(sceneAspect()) * scene::CameraComponent::view(cameraTransform);
+    const f32 aspect = options.aspect > 0.0f ? options.aspect : sceneAspect();
+    const glm::mat4 viewProjection = camera.projection(aspect) * scene::CameraComponent::view(cameraTransform);
     const glm::vec3 cameraDir = cameraTransform.rotation * glm::vec3(0.0f, 0.0f, -1.0f);
 
     if (options.grid) {
@@ -538,12 +557,13 @@ void Renderer::drawScene(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, con
         SDL_DrawGPUIndexedPrimitives(pass, mesh->indexCount, 1, 0, 0, 0);
     }
 
-    if (m_overlayVertexCount > 0 && m_overlayBuffer) {
+    const OverlayLayer* overlay = options.overlayLayer < m_overlays.size() ? &m_overlays[options.overlayLayer] : nullptr;
+    if (overlay && overlay->vertexCount > 0 && overlay->buffer) {
         SDL_BindGPUGraphicsPipeline(pass, m_overlayLinePipeline);
         SDL_PushGPUVertexUniformData(cmd, 0, &viewProjection, sizeof(viewProjection));
-        const SDL_GPUBufferBinding binding{m_overlayBuffer, 0};
+        const SDL_GPUBufferBinding binding{overlay->buffer, 0};
         SDL_BindGPUVertexBuffers(pass, 0, &binding, 1);
-        SDL_DrawGPUPrimitives(pass, m_overlayVertexCount, 1, 0, 0);
+        SDL_DrawGPUPrimitives(pass, overlay->vertexCount, 1, 0, 0);
     }
 }
 

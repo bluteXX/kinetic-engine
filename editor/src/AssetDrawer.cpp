@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 
 namespace kinetic::editor {
 
@@ -151,8 +152,14 @@ bool AssetDrawer::loadFile(const std::filesystem::path& path)
     // Animated first: an FBX with a skin or animation becomes an animated model.
     if (assets::isSupportedModelFile(path)) {
         if (auto model = assets::loadSkinnedModel(path, &error)) {
+            // Static rest-pose copy: used when the model is placed without animation.
+            const scene::MeshId restMesh = m_renderer->addMesh(name, anim::skinnedRestMesh(*model));
+            if (restMesh == renderer::Renderer::kInvalidMesh) {
+                m_status = path.filename().string() + ": GPU upload failed";
+                return false;
+            }
             const auto triangles = static_cast<u32>(model->skin.mesh.triangleCount());
-            m_assets.push_back({name, upperExtension(path), path, renderer::Renderer::kInvalidMesh, triangles,
+            m_assets.push_back({name, upperExtension(path), path, restMesh, triangles,
                                 std::make_shared<const anim::SkinnedModel>(std::move(*model))});
             m_loaded.insert(canonicalOrSelf(path));
             return true;
@@ -233,15 +240,9 @@ void AssetDrawer::drawTile(usize index, f32 size)
     ImGui::PopStyleColor(3);
 
     if (ImGui::BeginDragDropSource()) {
-        if (asset.animated()) {
-            ImGui::SetDragDropPayload(kModelPayload, &index, sizeof(index));
-            ImGui::Text("%s", asset.name.c_str());
-            ImGui::TextDisabled("drop on the Viewport");
-        } else {
-            ImGui::SetDragDropPayload(kMeshPayload, &asset.id, sizeof(asset.id));
-            ImGui::Text("%s", asset.name.c_str());
-            ImGui::TextDisabled("drop on the Viewport or a Mesh field");
-        }
+        ImGui::SetDragDropPayload(kAssetPayload, &index, sizeof(index));
+        ImGui::Text("%s", asset.name.c_str());
+        ImGui::TextDisabled("drop on the Viewport or an actor's Mesh field");
         ImGui::EndDragDropSource();
     }
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
@@ -279,6 +280,45 @@ void AssetDrawer::drawTile(usize index, f32 size)
 
     ImGui::EndGroup();
     ImGui::PopID();
+}
+
+const MeshAsset* AssetDrawer::findByMesh(scene::MeshId id) const
+{
+    const auto it = std::ranges::find(m_assets, id, &MeshAsset::id);
+    return it != m_assets.end() ? &*it : nullptr;
+}
+
+const MeshAsset* AssetDrawer::findByModel(const anim::SkinnedModel* model) const
+{
+    const auto it = std::ranges::find_if(m_assets, [&](const MeshAsset& a) { return a.model.get() == model; });
+    return it != m_assets.end() ? &*it : nullptr;
+}
+
+std::optional<usize> AssetDrawer::assetCombo(const char* label, const MeshAsset* current) const
+{
+    std::optional<usize> picked;
+    if (ImGui::BeginCombo(label, current ? current->name.c_str() : "<none>")) {
+        for (usize i = 0; i < m_assets.size(); ++i) {
+            const MeshAsset& asset = m_assets[i];
+            ImGui::PushID(static_cast<int>(i));
+            if (ImGui::Selectable(asset.name.c_str(), &asset == current)) {
+                picked = i;
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s%s, %u tris", asset.type.c_str(), asset.animated() ? " ANIM" : "", asset.triangles);
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kAssetPayload)) {
+            usize index = 0;
+            std::memcpy(&index, payload->Data, sizeof(index));
+            picked = index;
+        }
+        ImGui::EndDragDropTarget();
+    }
+    return picked;
 }
 
 } // namespace kinetic::editor
