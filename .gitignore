@@ -1,0 +1,17 @@
+# Build output
+build/
+cmake-build-*/
+out/
+
+# Dependency cache (CPM)
+.cpm-cache/
+
+# IDEs
+.idea/
+.vscode/
+*.user
+.DS_Store
+
+# Runtime
+imgui.ini
+*.log

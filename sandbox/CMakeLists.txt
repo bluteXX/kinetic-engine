@@ -1,0 +1,6 @@
+add_executable(sandbox src/main.cpp)
+target_link_libraries(sandbox PRIVATE kinetic::engine)
+kinetic_set_warnings(sandbox)
+kinetic_copy_shaders(sandbox)
+kinetic_copy_assets(sandbox)
+set_target_properties(sandbox PROPERTIES FOLDER "apps")

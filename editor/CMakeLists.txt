@@ -1,0 +1,6 @@
+add_executable(kinetic_editor src/main.cpp)
+target_link_libraries(kinetic_editor PRIVATE kinetic::engine)
+kinetic_set_warnings(kinetic_editor)
+kinetic_copy_shaders(kinetic_editor)
+kinetic_copy_assets(kinetic_editor)
+set_target_properties(kinetic_editor PROPERTIES OUTPUT_NAME "KineticEditor" FOLDER "apps")

@@ -1,0 +1,22 @@
+#pragma once
+
+#include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
+
+#include <string>
+
+namespace kinetic::scene {
+
+struct NameComponent {
+    std::string name;
+};
+
+struct TransformComponent {
+    glm::vec3 position{0.0f};
+    glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
+    glm::vec3 scale{1.0f};
+
+    [[nodiscard]] glm::mat4 matrix() const;
+};
+
+} // namespace kinetic::scene

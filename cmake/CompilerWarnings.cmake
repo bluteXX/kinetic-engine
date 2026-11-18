@@ -1,0 +1,16 @@
+# kinetic_set_warnings(<target>) — sane warning set for engine code (third-party code is left alone).
+function(kinetic_set_warnings target)
+    if(MSVC)
+        set(warnings /W4 /permissive- /w14640 /wd4100)
+        if(KINETIC_WARNINGS_AS_ERRORS)
+            list(APPEND warnings /WX)
+        endif()
+    else()
+        set(warnings -Wall -Wextra -Wpedantic -Wshadow -Wnon-virtual-dtor -Wcast-align
+                     -Woverloaded-virtual -Wnull-dereference -Wno-unused-parameter)
+        if(KINETIC_WARNINGS_AS_ERRORS)
+            list(APPEND warnings -Werror)
+        endif()
+    endif()
+    target_compile_options(${target} PRIVATE ${warnings})
+endfunction()
