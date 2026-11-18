@@ -1,6 +1,7 @@
 #include "AssetDrawer.h"
 
 #include <kinetic/assets/MeshLoader.h>
+#include <kinetic/assets/ModelLoader.h>
 #include <kinetic/core/Log.h>
 
 #include <SDL3/SDL_misc.h>
@@ -23,10 +24,16 @@ std::string upperExtension(const std::filesystem::path& path)
     return ext;
 }
 
-ImVec4 tileColor(const std::string& type)
+bool isAssetFile(const std::filesystem::path& path)
 {
-    if (type == "FBX") return {0.80f, 0.47f, 0.20f, 1.0f};
-    if (type == "OBJ") return {0.27f, 0.62f, 0.38f, 1.0f};
+    return assets::isSupportedMeshFile(path) || assets::isSupportedModelFile(path);
+}
+
+ImVec4 tileColor(const MeshAsset& asset)
+{
+    if (asset.animated()) return {0.62f, 0.38f, 0.85f, 1.0f};
+    if (asset.type == "FBX") return {0.80f, 0.47f, 0.20f, 1.0f};
+    if (asset.type == "OBJ") return {0.27f, 0.62f, 0.38f, 1.0f};
     return {0.35f, 0.42f, 0.58f, 1.0f}; // built-in
 }
 
@@ -39,27 +46,38 @@ std::filesystem::path canonicalOrSelf(const std::filesystem::path& path)
 
 } // namespace
 
-void AssetDrawer::init(renderer::Renderer& renderer, std::filesystem::path folder)
+void AssetDrawer::init(renderer::Renderer& renderer, std::vector<std::filesystem::path> folders)
 {
     m_renderer = &renderer;
-    m_folder = std::move(folder);
-    std::error_code ec;
-    std::filesystem::create_directories(m_folder, ec);
+    m_folders = std::move(folders);
+    if (!m_folders.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(m_folders.front(), ec);
+    }
 
-    m_assets.push_back({"Triangle", "BUILT-IN", {}, scene::kTriangleMesh, 1});
+    m_assets.push_back({"Triangle", "BUILT-IN", {}, scene::kTriangleMesh, 1, nullptr});
     refresh();
 }
 
 void AssetDrawer::refresh()
 {
-    std::error_code ec;
     std::vector<std::filesystem::path> files;
-    for (const auto& entry : std::filesystem::directory_iterator(m_folder, ec)) {
-        if (entry.is_regular_file() && assets::isSupportedMeshFile(entry.path())) {
-            files.push_back(entry.path());
+    std::string folderError;
+    for (const auto& folder : m_folders) {
+        std::error_code ec;
+        if (!std::filesystem::is_directory(folder, ec)) {
+            continue;
+        }
+        for (const auto& entry : std::filesystem::directory_iterator(folder, ec)) {
+            if (entry.is_regular_file() && isAssetFile(entry.path())) {
+                files.push_back(entry.path());
+            }
+        }
+        if (ec) {
+            folderError = "Cannot read " + folder.string() + ": " + ec.message();
         }
     }
-    std::ranges::sort(files);
+    std::ranges::sort(files, {}, [](const std::filesystem::path& p) { return p.filename(); });
 
     int added = 0;
     for (const auto& file : files) {
@@ -67,28 +85,46 @@ void AssetDrawer::refresh()
             ++added;
         }
     }
-    if (ec) {
-        m_status = "Cannot read " + m_folder.string() + ": " + ec.message();
+    if (!folderError.empty()) {
+        m_status = folderError;
     } else if (added > 0) {
-        m_status = "Loaded " + std::to_string(added) + " mesh(es) from " + m_folder.filename().string() + "/";
+        m_status = "Loaded " + std::to_string(added) + " asset(s)";
     }
+}
+
+std::filesystem::path AssetDrawer::importFolderFor(const std::filesystem::path& file) const
+{
+    const std::string type = upperExtension(file);
+    if (type == "GLB" || type == "GLTF") {
+        for (const auto& folder : m_folders) {
+            if (folder.filename() == "models") {
+                return folder;
+            }
+        }
+    }
+    return m_folders.empty() ? std::filesystem::path(".") : m_folders.front();
 }
 
 bool AssetDrawer::importFile(const std::filesystem::path& source)
 {
-    if (!assets::isSupportedMeshFile(source)) {
-        m_status = "Not a mesh file (.fbx / .obj): " + source.filename().string();
+    if (!isAssetFile(source)) {
+        m_status = "Not a mesh or model file (.fbx / .obj / .glb / .gltf): " + source.filename().string();
         return false;
     }
 
-    std::filesystem::path destination = m_folder / source.filename();
-    if (canonicalOrSelf(source.parent_path()) != canonicalOrSelf(m_folder)) {
+    const std::filesystem::path folder = importFolderFor(source);
+    std::filesystem::path destination = folder / source.filename();
+    if (canonicalOrSelf(source.parent_path()) != canonicalOrSelf(folder)) {
+        if (upperExtension(source) == "GLTF") {
+            m_status = "Note: .gltf files with separate .bin / textures need those copied too (prefer .glb)";
+        }
         // Don't overwrite a different file with the same name: "Name (2).fbx", "Name (3).fbx", ...
         for (int n = 2; std::filesystem::exists(destination); ++n) {
-            destination = m_folder / (source.stem().string() + " (" + std::to_string(n) + ")" +
-                                      source.extension().string());
+            destination = folder / (source.stem().string() + " (" + std::to_string(n) + ")" +
+                                    source.extension().string());
         }
         std::error_code ec;
+        std::filesystem::create_directories(folder, ec);
         std::filesystem::copy_file(source, destination, ec);
         if (ec) {
             m_status = "Copy failed: " + ec.message();
@@ -109,20 +145,36 @@ bool AssetDrawer::importFile(const std::filesystem::path& source)
 
 bool AssetDrawer::loadFile(const std::filesystem::path& path)
 {
+    const std::string name = path.stem().string();
     std::string error;
+
+    // Animated first: an FBX with a skin or animation becomes an animated model.
+    if (assets::isSupportedModelFile(path)) {
+        if (auto model = assets::loadSkinnedModel(path, &error)) {
+            const auto triangles = static_cast<u32>(model->skin.mesh.triangleCount());
+            m_assets.push_back({name, upperExtension(path), path, renderer::Renderer::kInvalidMesh, triangles,
+                                std::make_shared<const anim::SkinnedModel>(std::move(*model))});
+            m_loaded.insert(canonicalOrSelf(path));
+            return true;
+        }
+    }
+    if (!assets::isSupportedMeshFile(path)) {
+        m_status = path.filename().string() + ": " + error;
+        return false;
+    }
+
     const auto data = assets::loadMesh(path, &error);
     if (!data) {
         m_status = path.filename().string() + ": " + error;
         return false;
     }
-    const std::string name = path.stem().string();
     const scene::MeshId id = m_renderer->addMesh(name, *data);
     if (id == renderer::Renderer::kInvalidMesh) {
         m_status = path.filename().string() + ": GPU upload failed";
         return false;
     }
     m_loaded.insert(canonicalOrSelf(path));
-    m_assets.push_back({name, upperExtension(path), path, id, static_cast<u32>(data->triangleCount())});
+    m_assets.push_back({name, upperExtension(path), path, id, static_cast<u32>(data->triangleCount()), nullptr});
     return true;
 }
 
@@ -130,18 +182,20 @@ void AssetDrawer::draw()
 {
     ImGui::Begin("Assets");
 
-    ImGui::TextDisabled("meshes/");
-    ImGui::SameLine();
+    for (const auto& folder : m_folders) {
+        ImGui::TextDisabled("%s/", folder.filename().string().c_str());
+        ImGui::SameLine();
+    }
     if (ImGui::SmallButton("Refresh")) {
         refresh();
     }
     ImGui::SameLine();
-    if (ImGui::SmallButton("Open Folder")) {
-        const std::string url = "file://" + m_folder.string();
+    if (ImGui::SmallButton("Open Folder") && !m_folders.empty()) {
+        const std::string url = "file://" + m_folders.front().parent_path().string();
         SDL_OpenURL(url.c_str());
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("  drag a tile onto the Viewport, or drop .fbx / .obj files on the window");
+    ImGui::TextDisabled("  drag a tile onto the Viewport, or drop .fbx / .obj / .glb files on the window");
     ImGui::Separator();
 
     constexpr f32 kTile = 84.0f;
@@ -154,7 +208,7 @@ void AssetDrawer::draw()
         if (i % static_cast<usize>(columns) != 0) {
             ImGui::SameLine();
         }
-        drawTile(m_assets[i], kTile);
+        drawTile(i, kTile);
     }
     ImGui::EndChild();
 
@@ -164,36 +218,49 @@ void AssetDrawer::draw()
     ImGui::End();
 }
 
-void AssetDrawer::drawTile(const MeshAsset& asset, f32 size)
+void AssetDrawer::drawTile(usize index, f32 size)
 {
-    ImGui::PushID(static_cast<int>(asset.id));
+    const MeshAsset& asset = m_assets[index];
+    ImGui::PushID(static_cast<int>(index));
     ImGui::BeginGroup();
 
-    const ImVec4 color = tileColor(asset.type);
+    const ImVec4 color = tileColor(asset);
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(color.x * 0.55f, color.y * 0.55f, color.z * 0.55f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(color.x * 0.75f, color.y * 0.75f, color.z * 0.75f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, color);
-    ImGui::Button(asset.type.c_str(), ImVec2(size, size * 0.72f));
+    const std::string label = asset.animated() ? asset.type + "\nANIM" : asset.type;
+    ImGui::Button(label.c_str(), ImVec2(size, size * 0.72f));
     ImGui::PopStyleColor(3);
 
     if (ImGui::BeginDragDropSource()) {
-        ImGui::SetDragDropPayload(kMeshPayload, &asset.id, sizeof(asset.id));
-        ImGui::Text("%s", asset.name.c_str());
-        ImGui::TextDisabled("drop on the Viewport or a Mesh field");
+        if (asset.animated()) {
+            ImGui::SetDragDropPayload(kModelPayload, &index, sizeof(index));
+            ImGui::Text("%s", asset.name.c_str());
+            ImGui::TextDisabled("drop on the Viewport");
+        } else {
+            ImGui::SetDragDropPayload(kMeshPayload, &asset.id, sizeof(asset.id));
+            ImGui::Text("%s", asset.name.c_str());
+            ImGui::TextDisabled("drop on the Viewport or a Mesh field");
+        }
         ImGui::EndDragDropSource();
     }
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-        m_spawnRequest = asset.id;
+        m_spawnRequest = index;
     }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
         ImGui::BeginTooltip();
         ImGui::Text("%s", asset.name.c_str());
         ImGui::TextDisabled("%s, %u triangles", asset.type.c_str(), asset.triangles);
-        if (const renderer::GpuMesh* mesh = m_renderer->mesh(asset.id)) {
-            const glm::vec3 extent = mesh->boundsMax - mesh->boundsMin;
-            ImGui::TextDisabled("%.2f x %.2f x %.2f m", static_cast<double>(extent.x), static_cast<double>(extent.y),
-                                static_cast<double>(extent.z));
+        glm::vec3 extent(0.0f);
+        if (asset.animated()) {
+            ImGui::TextDisabled("Animated: %zu joints, %zu clip(s)", asset.model->skeleton.jointCount(),
+                                asset.model->clips.size());
+            extent = asset.model->restBoundsMax - asset.model->restBoundsMin;
+        } else if (const renderer::GpuMesh* mesh = m_renderer->mesh(asset.id)) {
+            extent = mesh->boundsMax - mesh->boundsMin;
         }
+        ImGui::TextDisabled("%.2f x %.2f x %.2f m", static_cast<double>(extent.x), static_cast<double>(extent.y),
+                            static_cast<double>(extent.z));
         if (!asset.path.empty()) {
             ImGui::TextDisabled("%s", asset.path.filename().string().c_str());
         }

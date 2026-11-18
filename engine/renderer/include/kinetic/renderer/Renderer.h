@@ -6,6 +6,7 @@
 
 #include <glm/glm.hpp>
 
+#include <span>
 #include <string>
 #include <vector>
 
@@ -17,8 +18,27 @@ struct GpuMesh {
     SDL_GPUBuffer* vertexBuffer = nullptr;
     SDL_GPUBuffer* indexBuffer = nullptr;
     u32 indexCount = 0;
+    u32 vertexCount = 0;
     glm::vec3 boundsMin{0.0f};
     glm::vec3 boundsMax{0.0f};
+    // Dynamic meshes belong to one object (e.g. a skinned character) and get new vertices every
+    // frame; they are hidden from mesh pickers. `staging` is their persistent upload buffer.
+    bool dynamic = false;
+    SDL_GPUTransferBuffer* staging = nullptr;
+    bool uploadPending = false;
+
+    [[nodiscard]] bool alive() const { return vertexBuffer != nullptr; }
+};
+
+enum class MeshUsage : u8 {
+    Static,  // uploaded once
+    Dynamic, // vertices replaced with updateMeshVertices()
+};
+
+// Coloured line vertex for debug overlays (two per segment).
+struct DebugVertex {
+    glm::vec3 position;
+    glm::vec3 color;
 };
 
 struct SceneDrawOptions {
@@ -41,9 +61,26 @@ public:
     // --- Mesh library -----------------------------------------------------------------------
     // Uploads a mesh and returns its id (kInvalidMesh on failure). Mesh 0 is the built-in triangle.
     static constexpr scene::MeshId kInvalidMesh = ~scene::MeshId{0};
-    scene::MeshId addMesh(std::string name, const MeshData& data);
+    scene::MeshId addMesh(std::string name, const MeshData& data, MeshUsage usage = MeshUsage::Static);
+    // Replaces the vertices of a dynamic mesh (same count as when it was added). The data is
+    // staged now and copied to the GPU at the start of the next frame (uploadPendingData).
+    bool updateMeshVertices(scene::MeshId id, std::span<const glm::vec3> positions, std::span<const glm::vec3> normals);
+    // Releases a mesh's GPU buffers. The id stays reserved (mesh(id) returns null afterwards).
+    void removeMesh(scene::MeshId id);
     [[nodiscard]] const std::vector<GpuMesh>& meshes() const { return m_meshes; }
-    [[nodiscard]] const GpuMesh* mesh(scene::MeshId id) const { return id < m_meshes.size() ? &m_meshes[id] : nullptr; }
+    [[nodiscard]] const GpuMesh* mesh(scene::MeshId id) const
+    {
+        return id < m_meshes.size() && m_meshes[id].alive() ? &m_meshes[id] : nullptr;
+    }
+
+    // --- Debug overlay ------------------------------------------------------------------------
+    // World-space lines drawn on top of the scene (no depth test) by the next drawScene, e.g. a
+    // skeleton. Replaces the previous set; pass an empty vector to clear.
+    void setOverlayLines(std::vector<DebugVertex> lines);
+
+    // Copies staged data (dynamic meshes, overlay lines) to the GPU. Must be called once per
+    // frame on the frame's command buffer, before the scene pass (Application does this).
+    void uploadPendingData(SDL_GPUCommandBuffer* cmd);
 
     // --- Scene target -----------------------------------------------------------------------
     // (Re)creates the scene target if the size changed. Safe to call mid-frame: SDL_GPU defers
@@ -80,7 +117,15 @@ private:
     SDL_GPUGraphicsPipeline* m_trianglePipeline = nullptr;
     SDL_GPUGraphicsPipeline* m_meshPipeline = nullptr;
     SDL_GPUGraphicsPipeline* m_linePipeline = nullptr;
+    SDL_GPUGraphicsPipeline* m_overlayLinePipeline = nullptr; // lines without depth test
     std::vector<GpuMesh> m_meshes;
+
+    std::vector<DebugVertex> m_overlayLines;
+    bool m_overlayDirty = false;
+    SDL_GPUBuffer* m_overlayBuffer = nullptr;
+    SDL_GPUTransferBuffer* m_overlayStaging = nullptr;
+    u32 m_overlayCapacity = 0;    // vertices
+    u32 m_overlayVertexCount = 0; // vertices uploaded and drawn
 
     SDL_GPUBuffer* m_gridBuffer = nullptr;
     u32 m_gridVertexCount = 0;

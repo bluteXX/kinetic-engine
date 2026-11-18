@@ -6,14 +6,21 @@
 //   mouse wheel                      — move forward / back
 //   click an axis in the corner gizmo — view the scene from that axis
 //
-// Meshes: the Assets drawer (bottom) shows assets/meshes/. Drag a tile onto the Viewport to place
-// it on the floor, or onto an object's Mesh field to swap its mesh. Dropping .fbx / .obj files on
-// the window copies them into that folder.
+// Assets: the drawer (bottom) shows assets/meshes/ and assets/models/. Drag a tile onto the Viewport
+// to place it on the floor, or a static mesh onto an object's Mesh field to swap its mesh. Dropping
+// .fbx / .obj / .glb files on the window copies them into the asset folders. Files with a skin or
+// animation become animated (ANIM) assets.
+//
+// Animation: select an animated object; the Animation panel (tab next to Assets) lists its clips
+// and has the transport, timeline, skeleton overlay and joint hierarchy.
 
+#include "AnimationPanel.h"
 #include "AssetDrawer.h"
 
 #include <kinetic/app/Application.h>
 #include <kinetic/core/Log.h>
+#include <kinetic/renderer/AnimationSystem.h>
+#include <kinetic/scene/AnimatorComponent.h>
 #include <kinetic/scene/Scene.h>
 
 #include <SDL3/SDL_filesystem.h>
@@ -81,16 +88,16 @@ constexpr std::array<glm::vec3, 6> kPalette = {{
     {0.80f, 0.80f, 0.82f},
 }};
 
-// Folder the Assets drawer shows: the project's assets/meshes (dev builds), else next to the exe.
-std::filesystem::path meshesFolder()
+// Root of the folders the Assets drawer shows: the project's assets/ (dev builds), else next to the exe.
+std::filesystem::path assetsRoot()
 {
 #ifdef KINETIC_PROJECT_ASSETS_DIR
-    const std::filesystem::path project = std::filesystem::path(KINETIC_PROJECT_ASSETS_DIR) / "meshes";
-    if (std::filesystem::is_directory(project)) {
+    const std::filesystem::path project = std::filesystem::path(KINETIC_PROJECT_ASSETS_DIR);
+    if (std::filesystem::is_directory(project / "meshes")) {
         return project;
     }
 #endif
-    return std::filesystem::path(SDL_GetBasePath()) / "assets" / "meshes";
+    return std::filesystem::path(SDL_GetBasePath()) / "assets";
 }
 
 ImU32 toImColor(const glm::vec3& c, f32 alpha = 1.0f)
@@ -110,7 +117,7 @@ protected:
         m_camera = m_scene.createCamera("Camera", {0.0f, 1.2f, 3.5f}, {0.0f, 0.3f, 0.0f});
         m_selected = m_scene.createMesh("Triangle", scene::kTriangleMesh, glm::vec4(kPalette[0], 1.0f));
         m_scene.registry().get<scene::TransformComponent>(m_selected).position = {0.0f, 0.4f, 0.0f};
-        m_drawer.init(renderer(), meshesFolder());
+        m_drawer.init(renderer(), {assetsRoot() / "meshes", assetsRoot() / "models"});
         return true;
     }
 
@@ -130,7 +137,7 @@ protected:
 
     void onImGui() override
     {
-        const ImGuiID dockspace = ImGui::GetID("EditorLayout_v3"); // bump the name to reset saved layouts
+        const ImGuiID dockspace = ImGui::GetID("EditorLayout_v4"); // bump the name to reset saved layouts
         if (!m_layoutInitialized) {
             buildDefaultLayout(dockspace);
             m_layoutInitialized = true;
@@ -158,9 +165,18 @@ protected:
         drawInspector();
         drawStats();
         m_drawer.draw();
-        if (const auto mesh = m_drawer.takeSpawnRequest()) {
-            spawnMesh(*mesh, std::nullopt);
+        m_animationPanel.draw(m_scene, m_selected);
+        if (const auto index = m_drawer.takeSpawnRequest()) {
+            spawnAsset(*index, std::nullopt);
         }
+
+        // After the UI, so scrubbing / clip changes show up this frame.
+        renderer::updateAnimations(m_scene, renderer(), ImGui::GetIO().DeltaTime);
+        std::vector<renderer::DebugVertex> overlay;
+        if (m_animationPanel.showSkeleton) {
+            renderer::appendSkeletonLines(m_scene, overlay, m_selected, m_animationPanel.selectedJoint());
+        }
+        renderer().setOverlayLines(std::move(overlay));
     }
 
     void onRender(RenderContext& ctx) override
@@ -171,7 +187,8 @@ protected:
     }
 
 private:
-    // Hierarchy + Stats on the left, Inspector on the right, Viewport in the centre, Assets below it.
+    // Hierarchy + Stats on the left, Inspector on the right, Viewport in the centre, Assets and
+    // Animation (tabs) below it.
     // Only applied when there is no saved layout in imgui.ini yet.
     static void buildDefaultLayout(ImGuiID dockspace)
     {
@@ -191,6 +208,7 @@ private:
 
         ImGui::DockBuilderDockWindow("Viewport", center);
         ImGui::DockBuilderDockWindow("Assets", bottom);
+        ImGui::DockBuilderDockWindow("Animation", bottom);
         ImGui::DockBuilderDockWindow("Hierarchy", left);
         ImGui::DockBuilderDockWindow("Stats", leftBottom);
         ImGui::DockBuilderDockWindow("Inspector", right);
@@ -230,6 +248,11 @@ private:
                 scene::MeshId id = 0;
                 std::memcpy(&id, payload->Data, sizeof(id));
                 spawnMesh(id, groundPointUnderMouse(p0, size));
+            }
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(editor::AssetDrawer::kModelPayload)) {
+                usize index = 0;
+                std::memcpy(&index, payload->Data, sizeof(index));
+                spawnAsset(index, groundPointUnderMouse(p0, size));
             }
             ImGui::EndDragDropTarget();
         }
@@ -376,17 +399,42 @@ private:
         if (!mesh) {
             return;
         }
-        const glm::vec3 center = (mesh->boundsMin + mesh->boundsMax) * 0.5f;
-        const f32 radius = std::max(glm::length(mesh->boundsMax - mesh->boundsMin) * 0.5f, 0.05f);
-
         const glm::vec3 tint = kPalette[m_objectCounter % kPalette.size()];
         const std::string name = meshId == scene::kTriangleMesh ? "Object " + std::to_string(m_objectCounter) : mesh->name;
         const entt::entity entity = m_scene.createMesh(name, meshId, glm::vec4(tint, 1.0f));
         ++m_objectCounter;
+        placeEntity(entity, mesh->boundsMin, mesh->boundsMax, groundPoint);
+    }
 
+    // Adds the drawer asset `index`: an animated object for animated models, else a mesh object.
+    void spawnAsset(usize index, std::optional<glm::vec3> groundPoint)
+    {
+        const editor::MeshAsset* asset = m_drawer.asset(index);
+        if (!asset) {
+            return;
+        }
+        if (!asset->animated()) {
+            spawnMesh(asset->id, groundPoint);
+            return;
+        }
+        const glm::vec3 tint = kPalette[m_objectCounter % kPalette.size()];
+        const entt::entity entity =
+            renderer::createAnimatedEntity(m_scene, renderer(), asset->model, asset->name, glm::vec4(tint, 1.0f));
+        if (entity == entt::null) {
+            return;
+        }
+        ++m_objectCounter;
+        placeEntity(entity, asset->model->restBoundsMin, asset->model->restBoundsMax, groundPoint);
+    }
+
+    void placeEntity(entt::entity entity, const glm::vec3& boundsMin, const glm::vec3& boundsMax,
+                     std::optional<glm::vec3> groundPoint)
+    {
+        const glm::vec3 center = (boundsMin + boundsMax) * 0.5f;
+        const f32 radius = std::max(glm::length(boundsMax - boundsMin) * 0.5f, 0.05f);
         auto& position = m_scene.registry().get<scene::TransformComponent>(entity).position;
         if (groundPoint) {
-            position = *groundPoint - glm::vec3(center.x, mesh->boundsMin.y, center.z);
+            position = *groundPoint - glm::vec3(center.x, boundsMin.y, center.z);
         } else if (const entt::entity camera = m_scene.activeCamera(); camera != entt::null) {
             const auto& cam = m_scene.registry().get<scene::TransformComponent>(camera);
             position = cam.position + cam.rotation * glm::vec3(0.0f, 0.0f, -std::max(2.5f, radius * 2.5f)) - center;
@@ -414,6 +462,7 @@ private:
         ImGui::TextDisabled("Wheel: forward / back");
         ImGui::TextDisabled("Corner gizmo: click an axis");
         ImGui::TextDisabled("Assets: drag a mesh onto the Viewport");
+        ImGui::TextDisabled("ANIM assets: see the Animation tab");
         ImGui::End();
     }
 
@@ -430,7 +479,9 @@ private:
 
         for (const entt::entity entity : entities) {
             const auto& name = m_scene.registry().get<scene::NameComponent>(entity).name;
-            const char* icon = m_scene.registry().all_of<scene::CameraComponent>(entity) ? "[cam] " : "";
+            const char* icon = m_scene.registry().all_of<scene::CameraComponent>(entity)     ? "[cam] "
+                               : m_scene.registry().all_of<scene::AnimatorComponent>(entity) ? "[anim] "
+                                                                                             : "";
             ImGui::PushID(static_cast<int>(entt::to_integral(entity)));
             if (ImGui::Selectable((std::string(icon) + name).c_str(), m_selected == entity)) {
                 m_selected = entity;
@@ -493,11 +544,13 @@ private:
             }
         }
 
-        if (!registry.all_of<scene::CameraComponent>(m_selected)) {
+        if (auto* animator = registry.try_get<scene::AnimatorComponent>(m_selected); animator && animator->model) {
+            drawAnimatorInspector(*animator);
+        } else if (!registry.all_of<scene::CameraComponent>(m_selected)) {
             if (auto* mesh = registry.try_get<scene::MeshRendererComponent>(m_selected)) {
                 bool keep = true;
                 if (ImGui::CollapsingHeader("Mesh", &keep, ImGuiTreeNodeFlags_DefaultOpen)) {
-                    meshCombo("Mesh", mesh->mesh);
+                    meshCombo("Mesh##meshAsset", mesh->mesh);
                     ImGui::ColorEdit3("Tint", glm::value_ptr(mesh->tint));
                 }
                 if (!keep) {
@@ -515,10 +568,50 @@ private:
             ImGui::TextDisabled("The scene camera cannot be deleted.");
         } else if (ImGui::Button("Delete", ImVec2(-FLT_MIN, 0))) {
             m_eulerCache.erase(m_selected);
-            m_scene.destroyEntity(m_selected);
+            renderer::destroyEntity(m_scene, renderer(), m_selected);
             m_selected = entt::null;
         }
         ImGui::End();
+    }
+
+    // Animated objects: their mesh is a per-instance copy driven by the animation, so instead of
+    // the mesh picker show the model and a compact clip / play control (full controls live in the
+    // Animation panel).
+    void drawAnimatorInspector(scene::AnimatorComponent& animator)
+    {
+        auto& registry = m_scene.registry();
+        if (!ImGui::CollapsingHeader("Animated Model", ImGuiTreeNodeFlags_DefaultOpen)) {
+            return;
+        }
+        const anim::SkinnedModel& model = *animator.model;
+        ImGui::Text("%s", model.name.c_str());
+        ImGui::TextDisabled("%zu joints, %zu clip(s), %zu triangles", model.skeleton.jointCount(), model.clips.size(),
+                            model.skin.mesh.triangleCount());
+        if (auto* mesh = registry.try_get<scene::MeshRendererComponent>(m_selected)) {
+            ImGui::ColorEdit3("Tint", glm::value_ptr(mesh->tint));
+        }
+
+        anim::AnimationPlayer& player = animator.player;
+        const i32 clip = player.clip();
+        const char* preview =
+            clip >= 0 && static_cast<usize>(clip) < model.clips.size() ? model.clips[static_cast<usize>(clip)].name().c_str() : "<none>";
+        if (ImGui::BeginCombo("Clip", preview)) {
+            for (usize i = 0; i < model.clips.size(); ++i) {
+                if (ImGui::Selectable(model.clips[i].name().c_str(), static_cast<i32>(i) == clip)) {
+                    player.play(static_cast<i32>(i), 0.25f);
+                    animator.bindPose = false;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::Button(player.playing ? "Pause" : "Play")) {
+            player.playing = !player.playing;
+        }
+        ImGui::SameLine();
+        ImGui::Checkbox("Loop", &player.loop);
+        ImGui::SameLine();
+        ImGui::TextDisabled("%.2f s", static_cast<double>(player.time()));
+        ImGui::TextDisabled("More in the Animation panel.");
     }
 
     void meshCombo(const char* label, scene::MeshId& meshId)
@@ -554,6 +647,7 @@ private:
     bool m_showGrid = true;
     bool m_lookBlocked = false;
     editor::AssetDrawer m_drawer;
+    editor::AnimationPanel m_animationPanel;
     std::vector<std::string> m_droppedFiles;
 
     // Euler angles shown in the inspector, per entity (see drawInspector).

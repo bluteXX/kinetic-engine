@@ -2,6 +2,7 @@
 
 #include "kinetic/core/Log.h"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <span>
@@ -15,10 +16,7 @@ struct MeshVertex {
     glm::vec3 normal;
 };
 
-struct LineVertex {
-    glm::vec3 position;
-    glm::vec3 color;
-};
+using LineVertex = DebugVertex;
 
 struct MeshDrawUniforms {
     glm::mat4 mvp;
@@ -195,7 +193,12 @@ bool Renderer::createPipelines()
     line.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
     m_linePipeline = build("line", line, 1, 0);
 
-    return m_trianglePipeline && m_meshPipeline && m_linePipeline;
+    SDL_GPUGraphicsPipelineCreateInfo overlay = line;
+    overlay.depth_stencil_state.enable_depth_test = false;
+    overlay.depth_stencil_state.enable_depth_write = false;
+    m_overlayLinePipeline = build("line", overlay, 1, 0);
+
+    return m_trianglePipeline && m_meshPipeline && m_linePipeline && m_overlayLinePipeline;
 }
 
 bool Renderer::createGrid()
@@ -219,7 +222,7 @@ bool Renderer::createGrid()
     return m_gridBuffer != nullptr;
 }
 
-scene::MeshId Renderer::addMesh(std::string name, const MeshData& data)
+scene::MeshId Renderer::addMesh(std::string name, const MeshData& data, MeshUsage usage)
 {
     if (data.empty() || data.positions.size() != data.normals.size()) {
         KN_ERROR("addMesh('{}'): empty mesh or mismatched positions/normals", name);
@@ -237,15 +240,132 @@ scene::MeshId Renderer::addMesh(std::string name, const MeshData& data)
     mesh.indexBuffer =
         uploadBuffer(m_device->handle(), SDL_GPU_BUFFERUSAGE_INDEX, std::as_bytes(std::span(data.indices)));
     mesh.indexCount = static_cast<u32>(data.indices.size());
+    mesh.vertexCount = static_cast<u32>(vertices.size());
     mesh.boundsMin = data.boundsMin();
     mesh.boundsMax = data.boundsMax();
-    if (!mesh.vertexBuffer || !mesh.indexBuffer) {
+    if (usage == MeshUsage::Dynamic) {
+        mesh.dynamic = true;
+        SDL_GPUTransferBufferCreateInfo stagingInfo{};
+        stagingInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        stagingInfo.size = static_cast<Uint32>(vertices.size() * sizeof(MeshVertex));
+        mesh.staging = SDL_CreateGPUTransferBuffer(m_device->handle(), &stagingInfo);
+    }
+    if (!mesh.vertexBuffer || !mesh.indexBuffer || (mesh.dynamic && !mesh.staging)) {
         if (mesh.vertexBuffer) SDL_ReleaseGPUBuffer(m_device->handle(), mesh.vertexBuffer);
         if (mesh.indexBuffer) SDL_ReleaseGPUBuffer(m_device->handle(), mesh.indexBuffer);
+        if (mesh.staging) SDL_ReleaseGPUTransferBuffer(m_device->handle(), mesh.staging);
         return kInvalidMesh;
     }
     m_meshes.push_back(std::move(mesh));
     return static_cast<scene::MeshId>(m_meshes.size() - 1);
+}
+
+bool Renderer::updateMeshVertices(scene::MeshId id, std::span<const glm::vec3> positions,
+                                  std::span<const glm::vec3> normals)
+{
+    if (id >= m_meshes.size()) {
+        return false;
+    }
+    GpuMesh& mesh = m_meshes[id];
+    if (!mesh.alive() || !mesh.dynamic || positions.size() != mesh.vertexCount || normals.size() != mesh.vertexCount) {
+        return false;
+    }
+    // cycle = true: if the GPU is still reading the previous data, SDL hands out a fresh buffer.
+    auto* mapped = static_cast<MeshVertex*>(SDL_MapGPUTransferBuffer(m_device->handle(), mesh.staging, true));
+    if (!mapped) {
+        return false;
+    }
+    for (usize i = 0; i < positions.size(); ++i) {
+        mapped[i] = {positions[i], normals[i]};
+    }
+    SDL_UnmapGPUTransferBuffer(m_device->handle(), mesh.staging);
+    mesh.uploadPending = true;
+    return true;
+}
+
+void Renderer::removeMesh(scene::MeshId id)
+{
+    if (id >= m_meshes.size() || id == scene::kTriangleMesh) {
+        return;
+    }
+    GpuMesh& mesh = m_meshes[id];
+    SDL_GPUDevice* gpu = m_device->handle();
+    // SDL_GPU defers the actual release until command buffers using them have finished.
+    if (mesh.vertexBuffer) SDL_ReleaseGPUBuffer(gpu, mesh.vertexBuffer);
+    if (mesh.indexBuffer) SDL_ReleaseGPUBuffer(gpu, mesh.indexBuffer);
+    if (mesh.staging) SDL_ReleaseGPUTransferBuffer(gpu, mesh.staging);
+    mesh.vertexBuffer = nullptr;
+    mesh.indexBuffer = nullptr;
+    mesh.staging = nullptr;
+    mesh.uploadPending = false;
+}
+
+void Renderer::setOverlayLines(std::vector<DebugVertex> lines)
+{
+    m_overlayLines = std::move(lines);
+    m_overlayDirty = true;
+}
+
+void Renderer::uploadPendingData(SDL_GPUCommandBuffer* cmd)
+{
+    SDL_GPUDevice* gpu = m_device->handle();
+
+    // Grow the overlay buffers if needed and stage the lines.
+    const auto overlayCount = static_cast<u32>(m_overlayLines.size());
+    bool uploadOverlay = false;
+    if (m_overlayDirty) {
+        m_overlayDirty = false;
+        m_overlayVertexCount = 0;
+        if (overlayCount > m_overlayCapacity) {
+            if (m_overlayBuffer) SDL_ReleaseGPUBuffer(gpu, m_overlayBuffer);
+            if (m_overlayStaging) SDL_ReleaseGPUTransferBuffer(gpu, m_overlayStaging);
+            m_overlayCapacity = std::max(overlayCount, m_overlayCapacity * 2);
+            const auto bytes = static_cast<Uint32>(m_overlayCapacity * sizeof(DebugVertex));
+            SDL_GPUBufferCreateInfo bufferInfo{};
+            bufferInfo.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
+            bufferInfo.size = bytes;
+            m_overlayBuffer = SDL_CreateGPUBuffer(gpu, &bufferInfo);
+            SDL_GPUTransferBufferCreateInfo stagingInfo{};
+            stagingInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+            stagingInfo.size = bytes;
+            m_overlayStaging = SDL_CreateGPUTransferBuffer(gpu, &stagingInfo);
+            if (!m_overlayBuffer || !m_overlayStaging) {
+                KN_ERROR("Overlay line buffers: {}", SDL_GetError());
+                m_overlayCapacity = 0;
+            }
+        }
+        if (overlayCount > 0 && overlayCount <= m_overlayCapacity) {
+            void* mapped = SDL_MapGPUTransferBuffer(gpu, m_overlayStaging, true);
+            if (mapped) {
+                std::memcpy(mapped, m_overlayLines.data(), overlayCount * sizeof(DebugVertex));
+                SDL_UnmapGPUTransferBuffer(gpu, m_overlayStaging);
+                uploadOverlay = true;
+            }
+        }
+    }
+
+    const bool anyMesh = std::ranges::any_of(m_meshes, [](const GpuMesh& m) { return m.uploadPending; });
+    if (!anyMesh && !uploadOverlay) {
+        return;
+    }
+
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+    for (GpuMesh& mesh : m_meshes) {
+        if (!mesh.uploadPending) {
+            continue;
+        }
+        mesh.uploadPending = false;
+        const SDL_GPUTransferBufferLocation src{mesh.staging, 0};
+        const SDL_GPUBufferRegion dst{mesh.vertexBuffer, 0, static_cast<Uint32>(mesh.vertexCount * sizeof(MeshVertex))};
+        SDL_UploadToGPUBuffer(copy, &src, &dst, true);
+    }
+    if (uploadOverlay) {
+        const SDL_GPUTransferBufferLocation src{m_overlayStaging, 0};
+        const SDL_GPUBufferRegion dst{m_overlayBuffer, 0, static_cast<Uint32>(overlayCount * sizeof(DebugVertex))};
+        SDL_UploadToGPUBuffer(copy, &src, &dst, true);
+        m_overlayVertexCount = overlayCount;
+    }
+    SDL_EndGPUCopyPass(copy);
 }
 
 bool Renderer::resizeSceneTarget(u32 width, u32 height)
@@ -302,15 +422,22 @@ void Renderer::shutdown()
     for (GpuMesh& mesh : m_meshes) {
         if (mesh.vertexBuffer) SDL_ReleaseGPUBuffer(gpu, mesh.vertexBuffer);
         if (mesh.indexBuffer) SDL_ReleaseGPUBuffer(gpu, mesh.indexBuffer);
+        if (mesh.staging) SDL_ReleaseGPUTransferBuffer(gpu, mesh.staging);
     }
     m_meshes.clear();
+    if (m_overlayBuffer) SDL_ReleaseGPUBuffer(gpu, m_overlayBuffer);
+    if (m_overlayStaging) SDL_ReleaseGPUTransferBuffer(gpu, m_overlayStaging);
+    m_overlayBuffer = nullptr;
+    m_overlayStaging = nullptr;
+    m_overlayCapacity = 0;
+    m_overlayVertexCount = 0;
     if (m_gridBuffer) SDL_ReleaseGPUBuffer(gpu, m_gridBuffer);
     m_gridBuffer = nullptr;
     if (m_sceneColor) SDL_ReleaseGPUTexture(gpu, m_sceneColor);
     if (m_sceneDepth) SDL_ReleaseGPUTexture(gpu, m_sceneDepth);
     m_sceneColor = nullptr;
     m_sceneDepth = nullptr;
-    for (SDL_GPUGraphicsPipeline** p : {&m_trianglePipeline, &m_meshPipeline, &m_linePipeline}) {
+    for (SDL_GPUGraphicsPipeline** p : {&m_trianglePipeline, &m_meshPipeline, &m_linePipeline, &m_overlayLinePipeline}) {
         if (*p) SDL_ReleaseGPUGraphicsPipeline(gpu, *p);
         *p = nullptr;
     }
@@ -395,7 +522,7 @@ void Renderer::drawScene(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, con
     for (const entt::entity entity : view) {
         const auto& [transform, renderer] = view.get(entity);
         const GpuMesh* mesh = this->mesh(renderer.mesh);
-        if (!mesh) {
+        if (!mesh || !renderer.visible) {
             continue;
         }
         const glm::mat4 model = transform.matrix();
@@ -409,6 +536,14 @@ void Renderer::drawScene(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, con
         SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
         SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
         SDL_DrawGPUIndexedPrimitives(pass, mesh->indexCount, 1, 0, 0, 0);
+    }
+
+    if (m_overlayVertexCount > 0 && m_overlayBuffer) {
+        SDL_BindGPUGraphicsPipeline(pass, m_overlayLinePipeline);
+        SDL_PushGPUVertexUniformData(cmd, 0, &viewProjection, sizeof(viewProjection));
+        const SDL_GPUBufferBinding binding{m_overlayBuffer, 0};
+        SDL_BindGPUVertexBuffers(pass, 0, &binding, 1);
+        SDL_DrawGPUPrimitives(pass, m_overlayVertexCount, 1, 0, 0);
     }
 }
 

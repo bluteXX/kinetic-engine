@@ -11,8 +11,8 @@
 ```
 core
 animation -> core                  pure CPU math, no SDL / GPU
-assets    -> animation             glTF import
-scene     -> core                  EnTT registry + components
+assets    -> animation             glTF / FBX / OBJ import (cgltf, ufbx)
+scene     -> animation             EnTT registry + components (AnimatorComponent)
 platform  -> core                  SDL3 window / input
 gfx       -> platform              SDL_GPU device, shaders, frame lifecycle
 renderer  -> gfx, scene
@@ -33,15 +33,23 @@ wrapped in an Unreal plugin or a command-line baking tool.
 events ─► fixed update ×N ─► update ─► ImGui ─► render
               │
               └─ animation: sample clips → blend → IK → local pose
-                            → localToModel → skinning matrices ──► GPU (milestone 4)
+                            → localToModel → skinning matrices → CPU skinning ──► vertex upload
 ```
+
+- **Animated objects** have a `MeshRendererComponent` pointing at their *own* dynamic mesh
+  (`MeshUsage::Dynamic`) plus an `AnimatorComponent` (shared `SkinnedModel` + `AnimationPlayer`).
+  `renderer::updateAnimations` advances each player, evaluates the pose (with crossfade), skins
+  the vertices on the CPU (`anim::skinVertices`) and stages them; `Renderer::uploadPendingData`
+  copies them in the frame's copy pass. CPU skinning needs no new shaders; GPU skinning (joint
+  matrices in a storage buffer, skinned in `mesh.vert`) replaces it once heavier characters need
+  it. The editor advances animation per frame (after the UI, so scrubbing shows immediately).
 
 - **Fixed timestep** (`AppDesc::fixedTimestep`, 60 Hz): animation and physics advance in
   constant steps, so results don't depend on frame rate. Rendering gets `interpolationAlpha`
   to interpolate between the last two ticks. Frame time is clamped to 0.25 s to avoid the
   "spiral of death" after a breakpoint.
 - **Frame lifecycle** (`gfx::Device`): acquire command buffer + swapchain → copy passes
-  (ImGui upload, mesh uploads, later: skinning matrices) → scene pass into the offscreen
+  (ImGui upload, mesh uploads, skinned vertices, overlay lines) → scene pass into the offscreen
   *scene target* (colour + depth) → [sandbox: blit to swapchain] → overlay pass on the swapchain
   (ImGui) → submit. The editor sizes the scene target to its Viewport panel and draws it there as
   an ImGui image (`AppDesc::presentScene = false`).
@@ -51,11 +59,27 @@ events ─► fixed update ×N ─► update ─► ImGui ─► render
 - **Meshes** live in the renderer's library; `MeshRendererComponent::mesh` is an index into it
   (0 = built-in triangle). `assets::loadMesh` turns .fbx / .obj into `MeshData` (Y-up, meters,
   transforms baked, triangulated) via ufbx; `Renderer::addMesh` uploads it.
-- **Editor assets:** the *Assets* drawer loads every .fbx / .obj in `assets/meshes/` on startup
-  (the project folder, so additions end up in the repo). Tiles are ImGui drag & drop sources
-  carrying a `MeshId`; the Viewport and the Inspector's Mesh field accept them.
+- **Editor assets:** the *Assets* drawer loads every file in `assets/meshes/` and
+  `assets/models/` on startup (the project folders, so additions end up in the repo). Files with a
+  skin or animation become animated (ANIM) assets via `assets::loadSkinnedModel`; the rest are
+  static meshes. Static tiles carry a `MeshId` (Viewport, Inspector Mesh field); ANIM tiles carry
+  the asset index (Viewport).
+- **Animation panel** (editor, tab next to Assets): clip list with crossfade, transport, timeline
+  with keyframe markers and scrubbing, skeleton overlay (`Renderer::setOverlayLines`, drawn
+  without depth test), bind pose toggle and the joint hierarchy.
 
 ## Animation data
+
+- **`SkinnedModel`** = bind-pose mesh with ≤ 4 joint influences per vertex + `Skeleton` + clips.
+  Loaders guarantee skinning the rest pose reproduces the model as authored:
+  - *glTF*: all ancestors of the skin's joints become helper joints (joint world transforms
+    include them, e.g. a `Z_UP` or 0.01-scaled `Armature` node).
+  - *FBX*: joints are every bone plus its ancestors up to the scene root (which holds the axis /
+    unit conversion, `UFBX_SPACE_CONVERSION_TRANSFORM_ROOT`). The rest pose is derived from the
+    skin clusters' bind matrices, because node transforms as loaded may already be posed by the
+    current take. Animation stacks are baked with `ufbx_bake_anim` to linear keys. Meshes without
+    a skin are bound rigidly to their own node.
+  - Helper joints are flagged (`SkinnedModel::isBone`) and hidden from skeleton overlays.
 
 - **`Pose` is Structure-of-Arrays** — separate arrays of translations, rotations and scales.
   Blending, sampling and IK iterate those arrays linearly (cache-friendly, easy to SIMD later).
