@@ -22,37 +22,61 @@ void addCross(std::vector<DebugVertex>& out, const glm::vec3& p, f32 size, const
 
 } // namespace
 
-entt::entity createAnimatedEntity(scene::Scene& scene, Renderer& renderer,
-                                  std::shared_ptr<const anim::SkinnedModel> model, std::string name,
-                                  const glm::vec4& tint)
+bool enableAnimation(scene::Scene& scene, Renderer& renderer, entt::entity entity,
+                     std::shared_ptr<const anim::SkinnedModel> model)
 {
-    if (!model) {
-        return entt::null;
+    auto& registry = scene.registry();
+    auto* meshRenderer = registry.valid(entity) ? registry.try_get<scene::MeshRendererComponent>(entity) : nullptr;
+    if (!model || !meshRenderer) {
+        return false;
     }
-    const scene::MeshId mesh = renderer.addMesh(name, model->skin.mesh, MeshUsage::Dynamic);
-    if (mesh == Renderer::kInvalidMesh) {
-        return entt::null;
+    disableAnimation(scene, renderer, entity); // switching models: drop the old instance first
+
+    const scene::MeshId instance = renderer.addMesh(model->name, model->skin.mesh, MeshUsage::Dynamic);
+    if (instance == Renderer::kInvalidMesh) {
+        return false;
     }
-    const entt::entity entity = scene.createMesh(std::move(name), mesh, tint);
-    auto& animator = scene.registry().emplace<scene::AnimatorComponent>(entity);
+    auto& animator = registry.emplace<scene::AnimatorComponent>(entity);
+    animator.restMesh = meshRenderer->mesh;
+    meshRenderer->mesh = instance;
     animator.model = std::move(model);
     if (!animator.model->clips.empty()) {
         animator.player.play(0);
     }
-    return entity;
+    return true;
 }
 
-void destroyEntity(scene::Scene& scene, Renderer& renderer, entt::entity entity)
+void disableAnimation(scene::Scene& scene, Renderer& renderer, entt::entity entity)
 {
     auto& registry = scene.registry();
     if (!registry.valid(entity)) {
         return;
     }
-    if (registry.all_of<scene::AnimatorComponent>(entity)) {
-        if (const auto* meshRenderer = registry.try_get<scene::MeshRendererComponent>(entity)) {
-            renderer.removeMesh(meshRenderer->mesh);
-        }
+    const auto* animator = registry.try_get<scene::AnimatorComponent>(entity);
+    if (!animator) {
+        return;
     }
+    if (auto* meshRenderer = registry.try_get<scene::MeshRendererComponent>(entity)) {
+        renderer.removeMesh(meshRenderer->mesh);
+        meshRenderer->mesh = animator->restMesh;
+    }
+    registry.remove<scene::AnimatorComponent>(entity);
+}
+
+void removeMesh(scene::Scene& scene, Renderer& renderer, entt::entity entity)
+{
+    disableAnimation(scene, renderer, entity);
+    if (scene.registry().valid(entity)) {
+        scene.registry().remove<scene::MeshRendererComponent>(entity);
+    }
+}
+
+void destroyEntity(scene::Scene& scene, Renderer& renderer, entt::entity entity)
+{
+    if (!scene.registry().valid(entity)) {
+        return;
+    }
+    disableAnimation(scene, renderer, entity);
     scene.destroyEntity(entity);
 }
 

@@ -8,12 +8,17 @@
 
 namespace kinetic::renderer {
 
-// Creates an entity that plays `model`: Transform + MeshRenderer (with its own dynamic mesh,
-// since every instance is deformed differently) + Animator, playing the first clip.
-// Returns entt::null if the mesh could not be uploaded.
-entt::entity createAnimatedEntity(scene::Scene& scene, Renderer& renderer,
-                                  std::shared_ptr<const anim::SkinnedModel> model, std::string name,
-                                  const glm::vec4& tint);
+// Makes an entity with a MeshRendererComponent play `model`: gives it its own dynamic mesh (every
+// instance is deformed differently) and an AnimatorComponent playing the first clip. The current
+// mesh id is kept as AnimatorComponent::restMesh. Returns false if the mesh could not be uploaded.
+bool enableAnimation(scene::Scene& scene, Renderer& renderer, entt::entity entity,
+                     std::shared_ptr<const anim::SkinnedModel> model);
+
+// Removes the AnimatorComponent, releases the per-instance mesh and restores the rest mesh.
+void disableAnimation(scene::Scene& scene, Renderer& renderer, entt::entity entity);
+
+// Removes an entity's MeshRendererComponent (and animation, which needs it).
+void removeMesh(scene::Scene& scene, Renderer& renderer, entt::entity entity);
 
 // Destroys an entity and, for animated entities, releases their per-instance mesh.
 void destroyEntity(scene::Scene& scene, Renderer& renderer, entt::entity entity);

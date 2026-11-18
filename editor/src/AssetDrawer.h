@@ -20,7 +20,7 @@ struct MeshAsset {
     std::string name;
     std::string type; // file type: "BUILT-IN", "FBX", "OBJ", "GLB", "GLTF"
     std::filesystem::path path; // empty for built-ins
-    scene::MeshId id = scene::kTriangleMesh; // static meshes only
+    scene::MeshId id = scene::kTriangleMesh; // static mesh (animated models: their rest pose)
     u32 triangles = 0;
     std::shared_ptr<const anim::SkinnedModel> model; // animated models only
 
@@ -31,14 +31,12 @@ struct MeshAsset {
 //
 // Shows every mesh / model in the project's asset folders (loaded on startup, Refresh picks up
 // new files) plus the built-in triangle. Files with a skin or animation become animated assets.
-// Tiles are ImGui drag & drop sources:
-//   static mesh   -> kMeshPayload  (scene::MeshId): Viewport places it, a Mesh field swaps to it
-//   animated model -> kModelPayload (asset index):  Viewport places an animated object
-// Double-click a tile to place it in front of the camera.
+// Tiles are ImGui drag & drop sources carrying the asset index (kAssetPayload): the Viewport
+// places a new actor, an actor's Mesh field switches to the asset. Double-click a tile to place
+// it in front of the camera.
 class AssetDrawer {
 public:
-    static constexpr const char* kMeshPayload = "KINETIC_MESH";
-    static constexpr const char* kModelPayload = "KINETIC_MODEL";
+    static constexpr const char* kAssetPayload = "KINETIC_ASSET";
 
     // `folders[0]` receives imported .fbx / .obj files; .glb / .gltf go to the folder named
     // "models" if there is one.
@@ -56,6 +54,12 @@ public:
 
     [[nodiscard]] const std::vector<MeshAsset>& assets() const { return m_assets; }
     [[nodiscard]] const MeshAsset* asset(usize index) const { return index < m_assets.size() ? &m_assets[index] : nullptr; }
+    // Asset whose static mesh is `id`, or whose model is `model`.
+    [[nodiscard]] const MeshAsset* findByMesh(scene::MeshId id) const;
+    [[nodiscard]] const MeshAsset* findByModel(const anim::SkinnedModel* model) const;
+
+    // Combo box listing every asset; returns the picked index. Accepts asset drops too.
+    [[nodiscard]] std::optional<usize> assetCombo(const char* label, const MeshAsset* current) const;
 
 private:
     bool loadFile(const std::filesystem::path& path);

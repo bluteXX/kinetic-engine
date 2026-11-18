@@ -27,29 +27,37 @@ void tooltip(const char* text)
 
 } // namespace
 
-void AnimationPanel::draw(scene::Scene& scene, entt::entity selected)
+void AnimationPanel::syncSelection(entt::entity entity)
 {
-    ImGui::Begin("Animation");
+    if (entity != m_jointOwner) {
+        m_joint = -1;
+        m_jointOwner = entity;
+    }
+}
+
+void AnimationPanel::drawWindow(scene::Scene& scene, entt::entity selected, bool* open)
+{
+    ImGui::SetNextWindowSize(ImVec2(820.0f, 380.0f), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Animation", open)) {
+        ImGui::End();
+        return;
+    }
     auto& registry = scene.registry();
     auto* animator = registry.valid(selected) ? registry.try_get<scene::AnimatorComponent>(selected) : nullptr;
-
-    if (selected != m_jointOwner) {
-        m_joint = -1;
-        m_jointOwner = selected;
-    }
+    syncSelection(selected);
     if (!animator || !animator->model) {
         ImGui::Spacing();
-        ImGui::TextDisabled("Select an animated object.");
-        ImGui::TextDisabled("Drag an ANIM tile from Assets into the Viewport to add one.");
+        ImGui::TextDisabled("Select an animated actor.");
+        ImGui::TextDisabled("Give an actor a Mesh with an animated (ANIM) asset and tick \"Animated\".");
         ImGui::End();
         return;
     }
 
     const anim::SkinnedModel& model = *animator->model;
-    ImGui::Text("%s", model.name.c_str());
+    ImGui::Text("%s", registry.get<scene::NameComponent>(selected).name.c_str());
     ImGui::SameLine();
-    ImGui::TextDisabled("  %zu joints  |  %zu clip(s)  |  %zu triangles", model.skeleton.jointCount(), model.clips.size(),
-                        model.skin.mesh.triangleCount());
+    ImGui::TextDisabled("  %s  |  %zu joints  |  %zu clip(s)  |  %zu triangles", model.name.c_str(),
+                        model.skeleton.jointCount(), model.clips.size(), model.skin.mesh.triangleCount());
 
     if (ImGui::BeginTable("##animation", 2, ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV)) {
         ImGui::TableSetupColumn("Clips", ImGuiTableColumnFlags_WidthFixed, 210.0f);
@@ -82,19 +90,10 @@ void AnimationPanel::draw(scene::Scene& scene, entt::entity selected)
         // --- Playback ----------------------------------------------------------------------------
         ImGui::TableSetColumnIndex(1);
         ImGui::BeginChild("##playback", ImVec2(0, 0), ImGuiChildFlags_None);
-        drawTransport(*animator);
+        drawTransport(*animator, false);
         drawTimeline(*animator);
-
         ImGui::Spacing();
-        ImGui::Checkbox("Skeleton", &showSkeleton);
-        ImGui::SameLine();
-        if (auto* mesh = registry.try_get<scene::MeshRendererComponent>(selected)) {
-            ImGui::Checkbox("Mesh", &mesh->visible);
-            ImGui::SameLine();
-        }
-        ImGui::Checkbox("Bind pose", &animator->bindPose);
-        tooltip("Show the skeleton's rest pose instead of the animation");
-
+        drawDisplayOptions(scene, selected, *animator);
         drawJoints(*animator);
         ImGui::EndChild();
         ImGui::EndTable();
@@ -102,7 +101,54 @@ void AnimationPanel::draw(scene::Scene& scene, entt::entity selected)
     ImGui::End();
 }
 
-void AnimationPanel::drawTransport(scene::AnimatorComponent& animator)
+void AnimationPanel::drawInline(scene::Scene& scene, entt::entity entity)
+{
+    auto* animator = scene.registry().try_get<scene::AnimatorComponent>(entity);
+    if (!animator || !animator->model) {
+        return;
+    }
+    syncSelection(entity);
+    ImGui::PushID("animation-inline");
+    drawClipCombo(*animator);
+    drawTransport(*animator, true);
+    drawTimeline(*animator);
+    drawDisplayOptions(scene, entity, *animator);
+    drawJoints(*animator);
+    ImGui::PopID();
+}
+
+void AnimationPanel::drawClipCombo(scene::AnimatorComponent& animator)
+{
+    const auto clips = animator.clips();
+    const i32 current = animator.player.clip();
+    const char* preview =
+        current >= 0 && static_cast<usize>(current) < clips.size() ? clips[static_cast<usize>(current)].name().c_str() : "<none>";
+    if (ImGui::BeginCombo("Clip", preview)) {
+        for (usize i = 0; i < clips.size(); ++i) {
+            char label[160];
+            std::snprintf(label, sizeof(label), "%s  (%.2fs)", clips[i].name().c_str(), static_cast<double>(clips[i].duration()));
+            if (ImGui::Selectable(label, static_cast<i32>(i) == current)) {
+                animator.bindPose = false;
+                animator.player.play(static_cast<i32>(i), static_cast<i32>(i) == current ? 0.0f : m_crossfade);
+            }
+        }
+        ImGui::EndCombo();
+    }
+}
+
+void AnimationPanel::drawDisplayOptions(scene::Scene& scene, entt::entity entity, scene::AnimatorComponent& animator)
+{
+    ImGui::Checkbox("Skeleton", &showSkeleton);
+    ImGui::SameLine();
+    if (auto* mesh = scene.registry().try_get<scene::MeshRendererComponent>(entity)) {
+        ImGui::Checkbox("Mesh", &mesh->visible);
+        ImGui::SameLine();
+    }
+    ImGui::Checkbox("Bind pose", &animator.bindPose);
+    tooltip("Show the skeleton's rest pose instead of the animation");
+}
+
+void AnimationPanel::drawTransport(scene::AnimatorComponent& animator, bool compact)
 {
     anim::AnimationPlayer& player = animator.player;
     const auto clips = animator.clips();
@@ -149,8 +195,13 @@ void AnimationPanel::drawTransport(scene::AnimatorComponent& animator)
     }
     ImGui::EndDisabled();
 
-    ImGui::SameLine();
+    if (!compact) {
+        ImGui::SameLine();
+    }
     ImGui::Checkbox("Loop", &player.loop);
+    if (compact) {
+        ImGui::SameLine();
+    }
 
     ImGui::SetNextItemWidth(160.0f);
     ImGui::SliderFloat("Speed", &player.speed, -2.0f, 3.0f, "x%.2f");
@@ -159,7 +210,9 @@ void AnimationPanel::drawTransport(scene::AnimatorComponent& animator)
     if (ImGui::SmallButton("1x")) {
         player.speed = 1.0f;
     }
-    ImGui::SameLine();
+    if (!compact) {
+        ImGui::SameLine();
+    }
     ImGui::SetNextItemWidth(120.0f);
     ImGui::SliderFloat("Crossfade", &m_crossfade, 0.0f, 1.0f, "%.2f s");
     tooltip("Blend time when switching clips");

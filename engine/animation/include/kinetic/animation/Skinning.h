@@ -50,6 +50,10 @@ struct SkinnedModel {
 void skinVertices(const SkinnedMesh& skin, std::span<const glm::mat4> skinMatrices, std::span<glm::vec3> outPositions,
                   std::span<glm::vec3> outNormals);
 
+// The model's mesh skinned in the skeleton's rest pose: what a static (non-animated) instance of
+// the model shows.
+[[nodiscard]] MeshData skinnedRestMesh(const SkinnedModel& model);
+
 // Skins the mesh in the rest pose and stores its bounds in model.restBoundsMin/Max.
 void computeRestBounds(SkinnedModel& model);
 

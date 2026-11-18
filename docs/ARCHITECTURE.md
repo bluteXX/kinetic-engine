@@ -59,14 +59,23 @@ events ─► fixed update ×N ─► update ─► ImGui ─► render
 - **Meshes** live in the renderer's library; `MeshRendererComponent::mesh` is an index into it
   (0 = built-in triangle). `assets::loadMesh` turns .fbx / .obj into `MeshData` (Y-up, meters,
   transforms baked, triangulated) via ufbx; `Renderer::addMesh` uploads it.
+- **Actors:** every scene object is an entity with Name + Transform. The editor creates empty
+  actors ("Add Actor") and adds components in the Inspector. The *Mesh* component picks any drawer
+  asset; for assets with a skeleton an *Animated* toggle calls `renderer::enableAnimation` /
+  `disableAnimation`, which swap between the asset's shared static rest-pose mesh and a
+  per-instance dynamic mesh + `AnimatorComponent`.
 - **Editor assets:** the *Assets* drawer loads every file in `assets/meshes/` and
   `assets/models/` on startup (the project folders, so additions end up in the repo). Files with a
-  skin or animation become animated (ANIM) assets via `assets::loadSkinnedModel`; the rest are
-  static meshes. Static tiles carry a `MeshId` (Viewport, Inspector Mesh field); ANIM tiles carry
-  the asset index (Viewport).
-- **Animation panel** (editor, tab next to Assets): clip list with crossfade, transport, timeline
-  with keyframe markers and scrubbing, skeleton overlay (`Renderer::setOverlayLines`, drawn
-  without depth test), bind pose toggle and the joint hierarchy.
+  skin or animation become animated (ANIM) assets via `assets::loadSkinnedModel` and also get a
+  static rest-pose mesh. Tiles drag an asset index (`kAssetPayload`) onto the Viewport (new actor)
+  or an actor's Mesh field.
+- **Selection:** clicking the Viewport (press + release with < 4 px movement; dragging still looks
+  around) casts `renderer::cameraRay` and `renderer::pickEntity` tests every visible mesh's
+  triangles in local space — animated actors in their current pose. The selection gets a bounding
+  box outline in the overlay; Del / F / Esc delete, frame and deselect.
+- **Animation UI:** the selected animated actor's Inspector has an *Animation* section with the
+  compact controls (clip, transport, timeline + scrubbing, skeleton / bind pose, joints); "Open in
+  window" shows the full Animation window (clip list, wider timeline), dockable anywhere.
 
 ## Animation data
 

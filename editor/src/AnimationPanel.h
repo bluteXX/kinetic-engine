@@ -8,7 +8,9 @@
 
 namespace kinetic::editor {
 
-// The "Animation" panel: plays the clips of the selected animated object.
+// Animation controls for an animated actor, in two layouts:
+//   drawInline  - compact, inside the Inspector's "Animation" section of the selected actor
+//   drawWindow  - the full "Animation" window (clip list on the left), opened on demand
 //
 //   Clips      list of the model's clips; click one to switch (crossfading from the current one)
 //   Transport  start / previous frame / play-pause / next frame / end, loop, speed, crossfade time
@@ -18,14 +20,20 @@ namespace kinetic::editor {
 //              its current local transform is shown
 class AnimationPanel {
 public:
-    void draw(scene::Scene& scene, entt::entity selected);
+    // Full window; `open` is cleared when the user closes it.
+    void drawWindow(scene::Scene& scene, entt::entity selected, bool* open);
+    // Compact controls for one entity (call inside another window).
+    void drawInline(scene::Scene& scene, entt::entity entity);
 
     // Read by the editor when building the skeleton overlay.
     bool showSkeleton = true;
     [[nodiscard]] i32 selectedJoint() const { return m_joint; }
 
 private:
-    void drawTransport(scene::AnimatorComponent& animator);
+    void syncSelection(entt::entity entity);
+    void drawClipCombo(scene::AnimatorComponent& animator);
+    void drawDisplayOptions(scene::Scene& scene, entt::entity entity, scene::AnimatorComponent& animator);
+    void drawTransport(scene::AnimatorComponent& animator, bool compact);
     void drawTimeline(scene::AnimatorComponent& animator);
     void drawJoints(const scene::AnimatorComponent& animator);
     void drawJointNode(const scene::AnimatorComponent& animator, usize joint);

@@ -241,6 +241,8 @@ scene::MeshId Renderer::addMesh(std::string name, const MeshData& data, MeshUsag
         uploadBuffer(m_device->handle(), SDL_GPU_BUFFERUSAGE_INDEX, std::as_bytes(std::span(data.indices)));
     mesh.indexCount = static_cast<u32>(data.indices.size());
     mesh.vertexCount = static_cast<u32>(vertices.size());
+    mesh.positions = data.positions;
+    mesh.indices = data.indices;
     mesh.boundsMin = data.boundsMin();
     mesh.boundsMax = data.boundsMax();
     if (usage == MeshUsage::Dynamic) {
@@ -298,6 +300,8 @@ void Renderer::removeMesh(scene::MeshId id)
     mesh.indexBuffer = nullptr;
     mesh.staging = nullptr;
     mesh.uploadPending = false;
+    mesh.positions = {};
+    mesh.indices = {};
 }
 
 void Renderer::setOverlayLines(std::vector<DebugVertex> lines)

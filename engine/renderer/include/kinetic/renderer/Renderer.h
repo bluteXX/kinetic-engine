@@ -26,6 +26,10 @@ struct GpuMesh {
     bool dynamic = false;
     SDL_GPUTransferBuffer* staging = nullptr;
     bool uploadPending = false;
+    // CPU copy of the geometry as uploaded (picking). Dynamic meshes keep their initial vertices;
+    // their current shape lives in the AnimatorComponent.
+    std::vector<glm::vec3> positions;
+    std::vector<u32> indices;
 
     [[nodiscard]] bool alive() const { return vertexBuffer != nullptr; }
 };
@@ -60,6 +64,7 @@ public:
 
     // --- Mesh library -----------------------------------------------------------------------
     // Uploads a mesh and returns its id (kInvalidMesh on failure). Mesh 0 is the built-in triangle.
+    // Adding a mesh may reallocate the library: don't hold GpuMesh pointers across this call.
     static constexpr scene::MeshId kInvalidMesh = ~scene::MeshId{0};
     scene::MeshId addMesh(std::string name, const MeshData& data, MeshUsage usage = MeshUsage::Static);
     // Replaces the vertices of a dynamic mesh (same count as when it was added). The data is
