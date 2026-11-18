@@ -65,6 +65,30 @@ add_library(ufbx STATIC ${ufbx_SOURCE_DIR}/ufbx.c)
 target_include_directories(ufbx SYSTEM PUBLIC ${ufbx_SOURCE_DIR})
 set_target_properties(ufbx PROPERTIES FOLDER "third_party")
 
+# --- Physics: Jolt ---------------------------------------------------------------
+# Static MSVC runtime OFF: the rest of the engine uses the default /MD runtime.
+CPMAddPackage(
+    NAME JoltPhysics
+    SYSTEM YES
+    GITHUB_REPOSITORY jrouwe/JoltPhysics
+    GIT_TAG v5.3.0
+    SOURCE_SUBDIR Build
+    OPTIONS
+        "TARGET_UNIT_TESTS OFF"
+        "TARGET_HELLO_WORLD OFF"
+        "TARGET_PERFORMANCE_TEST OFF"
+        "TARGET_SAMPLES OFF"
+        "TARGET_VIEWER OFF"
+        "ENABLE_ALL_WARNINGS OFF"
+        "USE_STATIC_MSVC_RUNTIME_LIBRARY OFF"
+        "INTERPROCEDURAL_OPTIMIZATION OFF"
+        "DOUBLE_PRECISION OFF"
+        "OVERRIDE_CXX_FLAGS OFF"
+)
+if(TARGET Jolt)
+    set_target_properties(Jolt PROPERTIES FOLDER "third_party")
+endif()
+
 # --- Dear ImGui (docking branch) + SDL3 / SDL_GPU backends ---------------------
 CPMAddPackage(
     NAME imgui

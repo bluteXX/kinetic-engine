@@ -13,6 +13,7 @@ core
 animation -> core                  pure CPU math, no SDL / GPU
 assets    -> animation             glTF / FBX / OBJ import (cgltf, ufbx)
 scene     -> animation             EnTT registry + components (AnimatorComponent)
+physics   -> core                  Jolt Physics behind PhysicsWorld (pimpl, no Jolt headers leak)
 platform  -> core                  SDL3 window / input
 gfx       -> platform              SDL_GPU device, shaders, frame lifecycle
 renderer  -> gfx, scene
@@ -102,6 +103,33 @@ events ─► fixed update ×N ─► update ─► ImGui ─► render
 - **Rotations blend with nlerp on the shortest arc** (`dot < 0 → negate`). It is cheaper than
   slerp and commutative for multi-way blends; clip sampling between keys uses slerp.
 - **Additive layers** store `additive - reference` and apply it on top of a base pose.
+
+## Physics
+
+- **`physics::PhysicsWorld`** wraps Jolt (single-threaded job system, 24 velocity / 6 position
+  solver iterations, 2 mm penetration slop). It is built for *measuring* force transmission:
+  - **Muscles** are hinge position motors with a spring (stiffness, damping) and a torque limit
+    (strength). Jolt applies torque limits in position mode too.
+  - Every joint reports the force it applies to its child (`GetTotalLambdaPosition / dt`) and the
+    muscle / limit torques (`GetTotalLambdaMotor / dt`): one collision step per `step()` keeps the
+    lambdas per step.
+  - **Contact force on a body** = momentum change - gravity - joint forces. Exact because damping
+    is 0 and the solver applies exactly those impulses.
+  - Verified by tests: a muscle holding a horizontal rod carries m g L/2 (= J^T F), saturates at
+    its strength, a resting box's contact force equals its weight.
+- **Rigid impacts are instantaneous** (one step): per-step forces scale with the step rate, the
+  impulses do not (tested: 240 Hz vs 960 Hz within 2 %). Analyses report impulses, angular
+  impulses and absorbed energy; peak forces are estimated from an assumed contact duration.
+  Jolt's CCD is linear only, so fast *rotating* blades need small steps (960 Hz) to stay out of
+  the target.
+- **Sword strike prototype** (`editor/src/SwordStrikeTest`, Physics menu): planar arm (torso,
+  upper arm, forearm, hand, welded sword) with anthropometric masses and biomechanical strengths,
+  driven by an `AnimationClip`; the stone is placed on the blade path from the clip's kinematics.
+  Debug draw: shapes, centres of mass, joint axes, joint force vectors, muscle torque arcs (sweep
+  and colour = load), contact force and points, grip force and torque, velocities, weights, the
+  animation's target pose, blade trail, viewport labels. The Physics window has the live table
+  (incl. J^T F per joint), the hit list with per-joint distribution, graphs, muscle tuning,
+  pause / step / slow motion / freeze on hit.
 
 ## Graphics
 

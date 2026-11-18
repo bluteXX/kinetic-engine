@@ -21,6 +21,7 @@
 
 #include "AnimationEditor.h"
 #include "AssetDrawer.h"
+#include "SwordStrikeTest.h"
 
 #include <kinetic/app/Application.h>
 #include <kinetic/core/Log.h>
@@ -171,6 +172,18 @@ protected:
                 }
                 ImGui::EndMenu();
             }
+            if (ImGui::BeginMenu("Physics")) {
+                if (ImGui::MenuItem(m_swordTest.active() ? "Sword Strike Test (running)" : "Sword Strike Test")) {
+                    startSwordTest();
+                }
+                if (ImGui::MenuItem("Remove Sword Strike Test", nullptr, false, m_swordTest.active())) {
+                    m_swordTest.destroy(m_scene, renderer());
+                    m_selected = entt::null;
+                }
+                ImGui::Separator();
+                ImGui::MenuItem("Physics Window", nullptr, &m_showPhysicsWindow);
+                ImGui::EndMenu();
+            }
             if (ImGui::BeginMenu("View")) {
                 if (ImGui::MenuItem("Animation Editor", nullptr, false, isAnimated(m_selected))) {
                     m_animationEditor.open(m_selected);
@@ -190,12 +203,16 @@ protected:
         drawStats();
         m_drawer.draw();
         m_animationEditor.draw(m_scene, renderer());
+        if (m_showPhysicsWindow) {
+            m_swordTest.drawWindow(&m_showPhysicsWindow);
+        }
         if (const auto index = m_drawer.takeSpawnRequest()) {
             spawnAsset(*index, std::nullopt);
         }
         handleShortcuts();
 
-        // After the UI, so scrubbing / clip changes show up this frame.
+        // After the UI, so scrubbing / clip changes / physics controls show up this frame.
+        m_swordTest.update(ImGui::GetIO().DeltaTime, m_scene);
         renderer::updateAnimations(m_scene, renderer(), ImGui::GetIO().DeltaTime);
         std::vector<renderer::DebugVertex> overlay;
         if (m_showSkeleton && isAnimated(m_selected)) {
@@ -208,6 +225,7 @@ protected:
             const glm::vec3 pad = glm::max((boxMax - boxMin) * 0.02f, glm::vec3(0.005f));
             renderer::appendBoxLines(overlay, boxMin - pad, boxMax + pad, kSelectionColor);
         }
+        m_swordTest.appendDebugLines(overlay);
         renderer().setOverlayLines(std::move(overlay));
         m_animationEditor.updateOverlay(m_scene, renderer());
     }
@@ -299,6 +317,13 @@ private:
         ImDrawList* drawList = ImGui::GetWindowDrawList();
         if (SDL_GPUTexture* texture = renderer().sceneColorTexture()) {
             drawList->AddImage(static_cast<ImTextureID>(reinterpret_cast<intptr_t>(texture)), p0, p1);
+        }
+
+        if (const entt::entity cam = m_scene.activeCamera(); cam != entt::null) {
+            const auto& registry = m_scene.registry();
+            const glm::mat4 viewProjection = registry.get<scene::CameraComponent>(cam).projection(size.x / size.y) *
+                                             scene::CameraComponent::view(registry.get<scene::TransformComponent>(cam));
+            m_swordTest.drawViewportLabels(drawList, viewProjection, p0, size);
         }
 
         const bool gizmoClicked = drawAxisGizmo(drawList, p0, p1, hovered);
@@ -489,6 +514,21 @@ private:
             position = cam.position + cam.rotation * glm::vec3(0.0f, 0.0f, -std::max(2.5f, radius * 2.5f)) - center;
         }
         m_selected = entity;
+    }
+
+    // Builds the sword-vs-stone physics prototype, frames the camera on it, opens the Physics window.
+    void startSwordTest()
+    {
+        if (!m_swordTest.active()) {
+            m_swordTest.create(m_scene, renderer());
+            if (const entt::entity camera = m_scene.activeCamera(); camera != entt::null) {
+                auto& cam = m_scene.registry().get<scene::TransformComponent>(camera);
+                cam.position = {0.7f, 1.35f, 3.1f};
+                cam.rotation = scene::lookAtRotation(cam.position, {0.55f, 1.0f, 0.0f});
+            }
+        }
+        m_showPhysicsWindow = true;
+        ImGui::SetWindowFocus("Physics");
     }
 
     [[nodiscard]] bool canDeleteSelected() const { return m_scene.registry().valid(m_selected) && m_selected != m_camera; }
@@ -859,6 +899,8 @@ private:
     bool m_lookBlocked = false;
     editor::AssetDrawer m_drawer;
     editor::AnimationEditor m_animationEditor;
+    editor::SwordStrikeTest m_swordTest;
+    bool m_showPhysicsWindow = false;
     std::vector<std::string> m_droppedFiles;
 
     // Euler angles shown in the inspector, per entity (see drawInspector).
