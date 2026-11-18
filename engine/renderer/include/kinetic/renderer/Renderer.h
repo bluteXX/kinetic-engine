@@ -46,7 +46,21 @@ struct DebugVertex {
 };
 
 struct SceneDrawOptions {
-    bool grid = true; // floor grid on XZ with the X (red) and Z (blue) axes
+    bool grid = true;     // floor grid on XZ with the X (red) and Z (blue) axes
+    u32 overlayLayer = 0; // which setOverlayLines() layer to draw on top
+    f32 aspect = 0.0f;    // camera aspect; 0 = the main scene target's
+};
+
+// Offscreen colour + depth target. The main scene target is owned by the Renderer; apps can
+// create more (e.g. an editor preview viewport) with Renderer::resizeTarget / releaseTarget.
+struct RenderTarget {
+    SDL_GPUTexture* color = nullptr;
+    SDL_GPUTexture* depth = nullptr;
+    u32 width = 0;
+    u32 height = 0;
+
+    [[nodiscard]] bool valid() const { return color != nullptr; }
+    [[nodiscard]] f32 aspect() const { return height > 0 ? static_cast<f32>(width) / static_cast<f32>(height) : 1.0f; }
 };
 
 // High-level renderer.
@@ -79,9 +93,9 @@ public:
     }
 
     // --- Debug overlay ------------------------------------------------------------------------
-    // World-space lines drawn on top of the scene (no depth test) by the next drawScene, e.g. a
-    // skeleton. Replaces the previous set; pass an empty vector to clear.
-    void setOverlayLines(std::vector<DebugVertex> lines);
+    // World-space lines drawn on top of the scene (no depth test) by drawScene calls whose
+    // options.overlayLayer is `layer`, e.g. a skeleton. Replaces the layer's previous set.
+    void setOverlayLines(std::vector<DebugVertex> lines, u32 layer = 0);
 
     // Copies staged data (dynamic meshes, overlay lines) to the GPU. Must be called once per
     // frame on the frame's command buffer, before the scene pass (Application does this).
@@ -90,11 +104,17 @@ public:
     // --- Scene target -----------------------------------------------------------------------
     // (Re)creates the scene target if the size changed. Safe to call mid-frame: SDL_GPU defers
     // releasing the old textures until the GPU is done with them.
-    bool resizeSceneTarget(u32 width, u32 height);
-    [[nodiscard]] SDL_GPUTexture* sceneColorTexture() const { return m_sceneColor; }
-    [[nodiscard]] u32 sceneWidth() const { return m_sceneWidth; }
-    [[nodiscard]] u32 sceneHeight() const { return m_sceneHeight; }
-    [[nodiscard]] f32 sceneAspect() const;
+    bool resizeSceneTarget(u32 width, u32 height) { return resizeTarget(m_sceneTarget, width, height); }
+    [[nodiscard]] SDL_GPUTexture* sceneColorTexture() const { return m_sceneTarget.color; }
+    [[nodiscard]] u32 sceneWidth() const { return m_sceneTarget.width; }
+    [[nodiscard]] u32 sceneHeight() const { return m_sceneTarget.height; }
+    [[nodiscard]] f32 sceneAspect() const { return m_sceneTarget.aspect(); }
+
+    // Any offscreen target: (re)create at a size (no-op if unchanged), release, render into.
+    bool resizeTarget(RenderTarget& target, u32 width, u32 height);
+    void releaseTarget(RenderTarget& target);
+    [[nodiscard]] SDL_GPURenderPass* beginTargetPass(SDL_GPUCommandBuffer* cmd, const RenderTarget& target,
+                                                     const glm::vec4& clearColor);
 
     // --- Passes -----------------------------------------------------------------------------
     // Scene pass: clears and renders into the scene target. Returns null if there is no target.
@@ -125,21 +145,22 @@ private:
     SDL_GPUGraphicsPipeline* m_overlayLinePipeline = nullptr; // lines without depth test
     std::vector<GpuMesh> m_meshes;
 
-    std::vector<DebugVertex> m_overlayLines;
-    bool m_overlayDirty = false;
-    SDL_GPUBuffer* m_overlayBuffer = nullptr;
-    SDL_GPUTransferBuffer* m_overlayStaging = nullptr;
-    u32 m_overlayCapacity = 0;    // vertices
-    u32 m_overlayVertexCount = 0; // vertices uploaded and drawn
+    struct OverlayLayer {
+        std::vector<DebugVertex> lines;
+        bool dirty = false;
+        SDL_GPUBuffer* buffer = nullptr;
+        SDL_GPUTransferBuffer* staging = nullptr;
+        u32 capacity = 0;    // vertices
+        u32 vertexCount = 0; // vertices uploaded and drawn
+        bool uploadPending = false;
+    };
+    std::vector<OverlayLayer> m_overlays;
 
     SDL_GPUBuffer* m_gridBuffer = nullptr;
     u32 m_gridVertexCount = 0;
 
     SDL_GPUTextureFormat m_depthFormat = SDL_GPU_TEXTUREFORMAT_INVALID;
-    SDL_GPUTexture* m_sceneColor = nullptr;
-    SDL_GPUTexture* m_sceneDepth = nullptr;
-    u32 m_sceneWidth = 0;
-    u32 m_sceneHeight = 0;
+    RenderTarget m_sceneTarget;
 };
 
 } // namespace kinetic::renderer

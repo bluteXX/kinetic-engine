@@ -54,6 +54,9 @@ protected:
     virtual void onUpdate(f32 /*dt*/) {}
     virtual void onImGui() {}
     virtual void onRender(RenderContext& /*ctx*/) {}
+    // Extra offscreen passes (e.g. an editor preview viewport), recorded before the main scene
+    // pass. Begin / end your own passes with Renderer::beginTargetPass / endPass.
+    virtual void onRenderOffscreen(gfx::Frame& /*frame*/, renderer::Renderer& /*renderer*/) {}
 
     [[nodiscard]] Window& window() { return m_window; }
     [[nodiscard]] gfx::Device& device() { return m_device; }

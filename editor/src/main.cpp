@@ -10,15 +10,16 @@
 // Keys (outside text fields): Delete — delete the selection, F — frame it, Esc — deselect.
 //
 // Actors: everything in the scene is an actor (name + transform). "Add Actor" creates an empty
-// one; "+ Add Component" in the Inspector gives it a Mesh. The Mesh component picks any asset from
-// the drawer; assets with a skeleton (ANIM) can be ticked "Animated", which adds an Animation
-// section with the playback controls. "Open in window" pops those out into the Animation window.
+// one; "+ Add Component" in the Inspector adds a Mesh Renderer (which asset it shows) and, for
+// assets with a skeleton (ANIM), an Animator (clip, loop, speed). The Inspector only holds these
+// settings; "Edit Animation..." (or double-clicking an animated actor) opens the Animation Editor
+// with its own preview, the clip list, the timeline and the skeleton.
 //
 // Assets: the drawer (bottom) shows assets/meshes/ and assets/models/. Drag a tile onto the Viewport
 // to place a new actor on the floor, or onto an actor's Mesh field to switch its asset. Dropping
 // .fbx / .obj / .glb files on the window copies them into the asset folders.
 
-#include "AnimationPanel.h"
+#include "AnimationEditor.h"
 #include "AssetDrawer.h"
 
 #include <kinetic/app/Application.h>
@@ -171,8 +172,11 @@ protected:
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("View")) {
-                ImGui::MenuItem("Animation Window", nullptr, &m_showAnimationWindow);
-                ImGui::MenuItem("Skeletons", nullptr, &m_animationPanel.showSkeleton);
+                if (ImGui::MenuItem("Animation Editor", nullptr, false, isAnimated(m_selected))) {
+                    m_animationEditor.open(m_selected);
+                }
+                ImGui::Separator();
+                ImGui::MenuItem("Skeleton of Selection", nullptr, &m_showSkeleton);
                 ImGui::MenuItem("Selection Outline", nullptr, &m_showSelectionBox);
                 ImGui::MenuItem("Grid", nullptr, &m_showGrid);
                 ImGui::EndMenu();
@@ -185,9 +189,7 @@ protected:
         drawInspector();
         drawStats();
         m_drawer.draw();
-        if (m_showAnimationWindow) {
-            m_animationPanel.drawWindow(m_scene, m_selected, &m_showAnimationWindow);
-        }
+        m_animationEditor.draw(m_scene, renderer());
         if (const auto index = m_drawer.takeSpawnRequest()) {
             spawnAsset(*index, std::nullopt);
         }
@@ -196,8 +198,9 @@ protected:
         // After the UI, so scrubbing / clip changes show up this frame.
         renderer::updateAnimations(m_scene, renderer(), ImGui::GetIO().DeltaTime);
         std::vector<renderer::DebugVertex> overlay;
-        if (m_animationPanel.showSkeleton) {
-            renderer::appendSkeletonLines(m_scene, overlay, m_selected, m_animationPanel.selectedJoint());
+        if (m_showSkeleton && isAnimated(m_selected)) {
+            renderer::appendSkeletonLines(m_scene.registry().get<scene::AnimatorComponent>(m_selected),
+                                          m_scene.registry().get<scene::TransformComponent>(m_selected).matrix(), overlay);
         }
         glm::vec3 boxMin;
         glm::vec3 boxMax;
@@ -206,7 +209,15 @@ protected:
             renderer::appendBoxLines(overlay, boxMin - pad, boxMax + pad, kSelectionColor);
         }
         renderer().setOverlayLines(std::move(overlay));
+        m_animationEditor.updateOverlay(m_scene, renderer());
     }
+
+    void onRenderOffscreen(gfx::Frame& frame, renderer::Renderer& renderer) override
+    {
+        m_animationEditor.renderPreview(frame, renderer);
+    }
+
+    void onShutdown() override { m_animationEditor.shutdown(renderer()); }
 
     void onRender(RenderContext& ctx) override
     {
@@ -296,6 +307,12 @@ private:
         }
         if (clicked && !m_lookBlocked) {
             selectUnderMouse(p0, size);
+        }
+        if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && !m_lookBlocked) {
+            selectUnderMouse(p0, size);
+            if (isAnimated(m_selected)) {
+                m_animationEditor.open(m_selected);
+            }
         }
         if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             m_lookBlocked = false;
@@ -543,7 +560,7 @@ private:
         ImGui::TextDisabled("Wheel: forward / back");
         ImGui::TextDisabled("Corner gizmo: click an axis");
         ImGui::TextDisabled("Assets: drag a tile onto the Viewport");
-        ImGui::TextDisabled("Animation: Inspector > Mesh > Animated");
+        ImGui::TextDisabled("Double-click animated actor: Animation Editor");
         ImGui::End();
     }
 
@@ -564,8 +581,15 @@ private:
                                : m_scene.registry().all_of<scene::AnimatorComponent>(entity) ? "[anim] "
                                                                                              : "";
             ImGui::PushID(static_cast<int>(entt::to_integral(entity)));
-            if (ImGui::Selectable((std::string(icon) + name).c_str(), m_selected == entity)) {
+            if (ImGui::Selectable((std::string(icon) + name).c_str(), m_selected == entity,
+                                  ImGuiSelectableFlags_AllowDoubleClick)) {
                 m_selected = entity;
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && isAnimated(entity)) {
+                    m_animationEditor.open(entity);
+                }
+            }
+            if (isAnimated(entity) && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip("Double-click: Animation Editor");
             }
             ImGui::PopID();
         }
@@ -590,13 +614,16 @@ private:
         auto& name = registry.get<scene::NameComponent>(m_selected);
         std::array<char, 128> buffer{};
         std::snprintf(buffer.data(), buffer.size(), "%s", name.name.c_str());
-        if (ImGui::InputText("Name", buffer.data(), buffer.size())) {
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::InputText("##name", buffer.data(), buffer.size())) {
             name.name = buffer.data();
         }
+        ImGui::Spacing();
 
-        if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen) && beginProperties("##transform")) {
             auto& transform = registry.get<scene::TransformComponent>(m_selected);
-            ImGui::DragFloat3("Position", glm::value_ptr(transform.position), 0.05f);
+            property("Position");
+            ImGui::DragFloat3("##position", glm::value_ptr(transform.position), 0.05f);
             // Keep the angles the user typed; re-derive them only when the rotation was changed
             // elsewhere (e.g. by the camera controller), picking the solution nearest the old values.
             EulerCache& euler = m_eulerCache[m_selected];
@@ -606,22 +633,28 @@ private:
                 euler.rotation = transform.rotation;
                 euler.valid = true;
             }
-            if (ImGui::DragFloat3("Rotation", glm::value_ptr(euler.degrees), 0.5f)) {
+            property("Rotation");
+            if (ImGui::DragFloat3("##rotation", glm::value_ptr(euler.degrees), 0.5f)) {
                 transform.rotation = glm::quat(glm::radians(euler.degrees));
                 euler.rotation = transform.rotation;
             }
             if (!registry.all_of<scene::CameraComponent>(m_selected)) {
-                ImGui::DragFloat3("Scale", glm::value_ptr(transform.scale), 0.05f);
+                property("Scale");
+                ImGui::DragFloat3("##scale", glm::value_ptr(transform.scale), 0.05f);
             }
+            ImGui::EndTable();
         }
 
         if (auto* camera = registry.try_get<scene::CameraComponent>(m_selected)) {
-            if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen) && beginProperties("##camera")) {
                 f32 fovDeg = glm::degrees(camera->fovY);
-                if (ImGui::SliderFloat("FOV", &fovDeg, 20.0f, 120.0f, "%.0f deg")) {
+                property("FOV");
+                if (ImGui::SliderFloat("##fov", &fovDeg, 20.0f, 120.0f, "%.0f deg")) {
                     camera->fovY = glm::radians(fovDeg);
                 }
-                ImGui::DragFloatRange2("Near / Far", &camera->nearPlane, &camera->farPlane, 0.05f, 0.01f, 10000.0f);
+                property("Near / Far");
+                ImGui::DragFloatRange2("##clip", &camera->nearPlane, &camera->farPlane, 0.05f, 0.01f, 10000.0f);
+                ImGui::EndTable();
             }
         }
 
@@ -630,7 +663,7 @@ private:
                 drawMeshComponent();
             }
             if (registry.all_of<scene::AnimatorComponent>(m_selected)) {
-                drawAnimationComponent();
+                drawAnimatorComponent();
             }
             drawAddComponent();
         }
@@ -645,51 +678,159 @@ private:
         ImGui::End();
     }
 
-    // Mesh component: which asset the actor shows and whether it plays the asset's animation.
+    // Two-column property grid: label on the left, full-width widget on the right.
+    static bool beginProperties(const char* id)
+    {
+        if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX)) {
+            return false;
+        }
+        ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed, 84.0f);
+        ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch);
+        return true;
+    }
+
+    static void property(const char* label)
+    {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(label);
+        ImGui::TableSetColumnIndex(1);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+    }
+
+    [[nodiscard]] bool isAnimated(entt::entity entity) const
+    {
+        const auto& registry = m_scene.registry();
+        return registry.valid(entity) && registry.all_of<scene::AnimatorComponent>(entity);
+    }
+
+    // Asset shown by the selected actor's Mesh Renderer.
+    [[nodiscard]] const editor::MeshAsset* selectedAsset() const
+    {
+        const auto& registry = m_scene.registry();
+        if (const auto* animator = registry.try_get<scene::AnimatorComponent>(m_selected)) {
+            return m_drawer.findByModel(animator->model.get());
+        }
+        const auto* mesh = registry.try_get<scene::MeshRendererComponent>(m_selected);
+        return mesh ? m_drawer.findByMesh(mesh->mesh) : nullptr;
+    }
+
+    // Mesh Renderer: which asset the actor shows, its tint and visibility.
     void drawMeshComponent()
     {
         auto& registry = m_scene.registry();
         bool keep = true;
-        if (ImGui::CollapsingHeader("Mesh", &keep, ImGuiTreeNodeFlags_DefaultOpen)) {
-            auto& mesh = registry.get<scene::MeshRendererComponent>(m_selected);
-            const auto* animator = registry.try_get<scene::AnimatorComponent>(m_selected);
-            const editor::MeshAsset* current =
-                animator ? m_drawer.findByModel(animator->model.get()) : m_drawer.findByMesh(mesh.mesh);
-
-            if (const auto picked = m_drawer.assetCombo("Asset", current)) {
-                setMeshAsset(*picked, animator != nullptr);
+        if (ImGui::CollapsingHeader("Mesh Renderer", &keep, ImGuiTreeNodeFlags_DefaultOpen) && beginProperties("##mesh")) {
+            const editor::MeshAsset* current = selectedAsset();
+            property("Asset");
+            if (const auto picked = m_drawer.assetCombo("##asset", current)) {
+                setMeshAsset(*picked, isAnimated(m_selected));
                 current = m_drawer.asset(*picked);
             }
             tooltip("Pick an asset, or drag a tile from the Assets drawer onto this field");
 
-            // Animated: only for assets with a skeleton.
-            bool animated = registry.all_of<scene::AnimatorComponent>(m_selected);
-            const bool canAnimate = current && current->animated();
-            ImGui::BeginDisabled(!canAnimate);
-            if (ImGui::Checkbox("Animated", &animated)) {
-                if (animated) {
+            auto& mesh = registry.get<scene::MeshRendererComponent>(m_selected);
+            property("Tint");
+            ImGui::ColorEdit3("##tint", glm::value_ptr(mesh.tint));
+            property("Visible");
+            ImGui::Checkbox("##visible", &mesh.visible);
+            ImGui::EndTable();
+
+            if (current && current->animated() && !isAnimated(m_selected)) {
+                ImGui::TextDisabled("This asset has %zu animation clip(s).", current->model->clips.size());
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Add Animator")) {
                     renderer::enableAnimation(m_scene, renderer(), m_selected, current->model);
-                } else {
-                    renderer::disableAnimation(m_scene, renderer(), m_selected);
                 }
             }
-            ImGui::EndDisabled();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled | ImGuiHoveredFlags_DelayShort)) {
-                ImGui::SetTooltip(canAnimate ? "Play the asset's animation clips"
-                                             : "This asset has no skeleton or animation (ANIM assets only)");
-            }
-            if (canAnimate) {
-                ImGui::SameLine();
-                ImGui::TextDisabled("%zu clip(s), %zu joints", current->model->clips.size(),
-                                    current->model->skeleton.jointCount());
-            }
-
-            auto& meshNow = registry.get<scene::MeshRendererComponent>(m_selected); // may have changed
-            ImGui::ColorEdit3("Tint", glm::value_ptr(meshNow.tint));
-            ImGui::Checkbox("Visible", &meshNow.visible);
         }
         if (!keep) {
             renderer::removeMesh(m_scene, renderer(), m_selected);
+        }
+    }
+
+    // Animator: playback settings only. Working with clips happens in the Animation Editor.
+    void drawAnimatorComponent()
+    {
+        bool keep = true;
+        if (ImGui::CollapsingHeader("Animator", &keep, ImGuiTreeNodeFlags_DefaultOpen) && beginProperties("##animator")) {
+            auto& animator = m_scene.registry().get<scene::AnimatorComponent>(m_selected);
+            anim::AnimationPlayer& player = animator.player;
+            const auto clips = animator.clips();
+            const i32 clip = player.clip();
+            const bool hasClip = clip >= 0 && static_cast<usize>(clip) < clips.size();
+
+            property("Clip");
+            if (ImGui::BeginCombo("##clip", hasClip ? clips[static_cast<usize>(clip)].name().c_str() : "<none>")) {
+                for (usize i = 0; i < clips.size(); ++i) {
+                    if (ImGui::Selectable(clips[i].name().c_str(), static_cast<i32>(i) == clip)) {
+                        player.play(static_cast<i32>(i), 0.25f);
+                        animator.bindPose = false;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            property("Loop");
+            ImGui::Checkbox("##loop", &player.loop);
+            property("Speed");
+            ImGui::SliderFloat("##speed", &player.speed, -2.0f, 3.0f, "x%.2f");
+            property("Playback");
+            ImGui::BeginDisabled(!hasClip);
+            if (ImGui::SmallButton(player.playing ? "Pause" : "Play")) {
+                player.playing = !player.playing;
+                animator.bindPose = false;
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (hasClip) {
+                ImGui::TextDisabled("%.2f / %.2f s", static_cast<double>(player.time()),
+                                    static_cast<double>(clips[static_cast<usize>(clip)].duration()));
+            } else {
+                ImGui::TextDisabled("no clip");
+            }
+            ImGui::EndTable();
+
+            if (ImGui::Button("Edit Animation...", ImVec2(-FLT_MIN, 0))) {
+                m_animationEditor.open(m_selected);
+            }
+            tooltip("Animation Editor: preview, clips, timeline and skeleton (or double-click the actor)");
+        }
+        if (!keep) {
+            renderer::disableAnimation(m_scene, renderer(), m_selected);
+        }
+    }
+
+    void drawAddComponent()
+    {
+        ImGui::Spacing();
+        if (ImGui::Button("+ Add Component", ImVec2(-FLT_MIN, 0))) {
+            ImGui::OpenPopup("##addComponent");
+        }
+        if (ImGui::BeginPopup("##addComponent")) {
+            auto& registry = m_scene.registry();
+            const bool hasMesh = registry.all_of<scene::MeshRendererComponent>(m_selected);
+            if (ImGui::MenuItem("Mesh Renderer", nullptr, false, !hasMesh)) {
+                registry.emplace<scene::MeshRendererComponent>(
+                    m_selected, scene::kTriangleMesh, glm::vec4(kPalette[m_objectCounter++ % kPalette.size()], 1.0f));
+            }
+            const editor::MeshAsset* asset = selectedAsset();
+            const bool canAnimate = hasMesh && !isAnimated(m_selected) && asset && asset->animated();
+            if (ImGui::MenuItem("Animator", nullptr, false, canAnimate)) {
+                renderer::enableAnimation(m_scene, renderer(), m_selected, asset->model);
+            }
+            if (!canAnimate && !isAnimated(m_selected) &&
+                ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("Needs a Mesh Renderer showing an animated (ANIM) asset");
+            }
+            ImGui::EndPopup();
+        }
+    }
+
+    static void tooltip(const char* text)
+    {
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::SetTooltip("%s", text);
         }
     }
 
@@ -707,45 +848,6 @@ private:
         }
     }
 
-    // Animation component: playback controls right here, or popped out into the Animation window.
-    void drawAnimationComponent()
-    {
-        if (!ImGui::CollapsingHeader("Animation", ImGuiTreeNodeFlags_DefaultOpen)) {
-            return;
-        }
-        if (ImGui::SmallButton(m_showAnimationWindow ? "Focus window" : "Open in window")) {
-            m_showAnimationWindow = true;
-            ImGui::SetWindowFocus("Animation");
-        }
-        tooltip("Bigger timeline, clip list and joint hierarchy in a separate (dockable) window");
-        m_animationPanel.drawInline(m_scene, m_selected);
-    }
-
-    void drawAddComponent()
-    {
-        ImGui::Spacing();
-        if (ImGui::Button("+ Add Component", ImVec2(-FLT_MIN, 0))) {
-            ImGui::OpenPopup("##addComponent");
-        }
-        if (ImGui::BeginPopup("##addComponent")) {
-            auto& registry = m_scene.registry();
-            const bool hasMesh = registry.all_of<scene::MeshRendererComponent>(m_selected);
-            if (ImGui::MenuItem("Mesh", nullptr, false, !hasMesh)) {
-                registry.emplace<scene::MeshRendererComponent>(
-                    m_selected, scene::kTriangleMesh, glm::vec4(kPalette[m_objectCounter++ % kPalette.size()], 1.0f));
-            }
-            ImGui::TextDisabled("Animation: tick \"Animated\" on a Mesh with an ANIM asset");
-            ImGui::EndPopup();
-        }
-    }
-
-    static void tooltip(const char* text)
-    {
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-            ImGui::SetTooltip("%s", text);
-        }
-    }
-
     scene::Scene m_scene;
     entt::entity m_camera = entt::null;
     entt::entity m_selected = entt::null;
@@ -753,10 +855,10 @@ private:
     bool m_layoutInitialized = false;
     bool m_showGrid = true;
     bool m_showSelectionBox = true;
-    bool m_showAnimationWindow = false;
+    bool m_showSkeleton = true; // skeleton of the selected animated actor in the Viewport
     bool m_lookBlocked = false;
     editor::AssetDrawer m_drawer;
-    editor::AnimationPanel m_animationPanel;
+    editor::AnimationEditor m_animationEditor;
     std::vector<std::string> m_droppedFiles;
 
     // Euler angles shown in the inspector, per entity (see drawInspector).

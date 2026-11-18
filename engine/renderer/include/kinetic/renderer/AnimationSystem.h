@@ -35,4 +35,8 @@ void updateAnimations(scene::Scene& scene, Renderer& renderer, f32 dt);
 void appendSkeletonLines(const scene::Scene& scene, std::vector<DebugVertex>& out,
                          entt::entity highlightEntity = entt::null, i32 highlightJoint = -1);
 
+// Bones of one animator placed with `world` (e.g. in a preview scene).
+void appendSkeletonLines(const scene::AnimatorComponent& animator, const glm::mat4& world,
+                         std::vector<DebugVertex>& out, i32 highlightJoint = -1);
+
 } // namespace kinetic::renderer
