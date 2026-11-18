@@ -54,6 +54,17 @@ CPMAddPackage(
 add_library(cgltf INTERFACE)
 target_include_directories(cgltf SYSTEM INTERFACE ${cgltf_SOURCE_DIR})
 
+# --- FBX / OBJ loader (single .c file, compiled in engine/assets) ------------
+CPMAddPackage(
+    NAME ufbx
+    GITHUB_REPOSITORY ufbx/ufbx
+    GIT_TAG v0.23.1
+    DOWNLOAD_ONLY YES
+)
+add_library(ufbx STATIC ${ufbx_SOURCE_DIR}/ufbx.c)
+target_include_directories(ufbx SYSTEM PUBLIC ${ufbx_SOURCE_DIR})
+set_target_properties(ufbx PROPERTIES FOLDER "third_party")
+
 # --- Dear ImGui (docking branch) + SDL3 / SDL_GPU backends ---------------------
 CPMAddPackage(
     NAME imgui

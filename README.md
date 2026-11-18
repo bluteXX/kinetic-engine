@@ -54,7 +54,7 @@ python3 tools/compile_shaders.py   # needs glslangValidator + spirv-cross (Vulka
 engine/
   core/        logging, asserts, types, clock
   animation/   Skeleton, Pose (SoA), AnimationClip, blending, skinning math   ← no SDL / GPU code
-  assets/      glTF import
+  assets/      glTF skeleton/animation import, FBX / OBJ meshes (ufbx)
   scene/       ECS (EnTT) + components
   platform/    SDL3 window and input
   gfx/         SDL_GPU device, shaders, frames
@@ -62,7 +62,7 @@ engine/
   ui/          Dear ImGui integration
   app/         Application base class + main loop
 sandbox/       feature playground
-editor/        dockable tool UI
+editor/        dockable tool UI (Viewport, Hierarchy, Inspector, Assets drawer)
 shaders/       GLSL sources + compiled SPIR-V / MSL
 tests/         unit tests
 tools/         scripts (shader compiler)
@@ -73,8 +73,8 @@ Design notes: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 ## Roadmap
 
 1. ~~Window, triangle, ImGui, CI~~
-2. Camera, depth buffer, mesh rendering from glTF, offscreen viewport in the editor
-3. Debug draw (lines, skeletons, gizmos)
+2. ~~Camera, depth buffer, offscreen viewport in the editor, FBX / OBJ mesh import, floor grid + axis gizmo~~
+3. Debug draw (skeletons, transform gizmos), glTF meshes
 4. GPU skinning
 5. Blend trees + animation state machine
 6. IK (two-bone, FABRIK), foot placement
@@ -83,7 +83,7 @@ Design notes: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Third-party
 
-SDL3, Dear ImGui, glm, spdlog, EnTT, cgltf, doctest (all fetched by CPM).
+SDL3, Dear ImGui, glm, spdlog, EnTT, cgltf, ufbx, doctest (all fetched by CPM).
 Sample model credits: [assets/models/CREDITS.md](assets/models/CREDITS.md).
 
 ## License

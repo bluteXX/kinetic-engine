@@ -6,6 +6,8 @@ using namespace metal;
 struct MaterialUniforms
 {
     float4 tint;
+    float4 keyLightDir;
+    float4 cameraDir;
 };
 
 struct main0_out
@@ -15,13 +17,21 @@ struct main0_out
 
 struct main0_in
 {
-    float3 vColor [[user(locn0)]];
+    float3 vNormal [[user(locn0)]];
 };
 
-fragment main0_out main0(main0_in in [[stage_in]], constant MaterialUniforms& _21 [[buffer(0)]])
+fragment main0_out main0(main0_in in [[stage_in]], constant MaterialUniforms& _29 [[buffer(0)]], bool gl_FrontFacing [[front_facing]])
 {
     main0_out out = {};
-    out.outColor = float4(in.vColor, 1.0) * _21.tint;
+    float3 n = fast::normalize(in.vNormal);
+    if (!gl_FrontFacing)
+    {
+        n = -n;
+    }
+    float key = fast::max(dot(n, _29.keyLightDir.xyz), 0.0);
+    float head = fast::max(dot(n, -_29.cameraDir.xyz), 0.0);
+    float light = (0.25 + (0.5 * key)) + (0.3499999940395355224609375 * head);
+    out.outColor = float4(_29.tint.xyz * light, 1.0);
     return out;
 }
 

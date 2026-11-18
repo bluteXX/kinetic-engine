@@ -1,0 +1,30 @@
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct LineUniforms
+{
+    float4x4 viewProjection;
+};
+
+struct main0_out
+{
+    float3 vColor [[user(locn0)]];
+    float4 gl_Position [[position]];
+};
+
+struct main0_in
+{
+    float3 aPosition [[attribute(0)]];
+    float3 aColor [[attribute(1)]];
+};
+
+vertex main0_out main0(main0_in in [[stage_in]], constant LineUniforms& _19 [[buffer(0)]])
+{
+    main0_out out = {};
+    out.gl_Position = _19.viewProjection * float4(in.aPosition, 1.0);
+    out.vColor = in.aColor;
+    return out;
+}
+

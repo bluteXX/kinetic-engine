@@ -111,6 +111,7 @@ void Application::pumpEvents()
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         m_imgui.processEvent(event);
+        onEvent(event);
         if (event.type == SDL_EVENT_QUIT ||
             (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && event.window.windowID == SDL_GetWindowID(m_window.handle()))) {
             m_running = false;
@@ -124,14 +125,21 @@ void Application::renderFrame(f32 alpha)
     if (frame.cmd && frame.swapchain) {
         m_imgui.prepare(frame.cmd); // copy pass, must precede the render passes
 
-        SDL_GPURenderPass* scenePass = m_renderer.beginScenePass(frame, clearColor);
-        if (scenePass) {
+        if (m_desc.presentScene) {
+            m_renderer.resizeSceneTarget(frame.width, frame.height);
+        }
+        // Scene -> offscreen target (the editor samples it in its Viewport panel).
+        if (SDL_GPURenderPass* scenePass = m_renderer.beginScenePass(frame.cmd, clearColor)) {
             RenderContext ctx{frame, scenePass, m_renderer, alpha};
             onRender(ctx);
             m_renderer.endPass(scenePass);
         }
+        if (m_desc.presentScene) {
+            m_renderer.blitSceneToSwapchain(frame);
+        }
 
-        SDL_GPURenderPass* overlayPass = m_renderer.beginOverlayPass(frame);
+        // UI -> swapchain.
+        SDL_GPURenderPass* overlayPass = m_renderer.beginOverlayPass(frame, !m_desc.presentScene, clearColor);
         m_imgui.render(frame.cmd, overlayPass);
         m_renderer.endPass(overlayPass);
     }

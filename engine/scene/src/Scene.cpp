@@ -91,7 +91,7 @@ entt::entity Scene::createCamera(std::string name, const glm::vec3& position, co
     return entity;
 }
 
-entt::entity Scene::createMesh(std::string name, BuiltinMesh mesh, const glm::vec4& tint)
+entt::entity Scene::createMesh(std::string name, MeshId mesh, const glm::vec4& tint)
 {
     const entt::entity entity = createEntity(std::move(name));
     m_registry.emplace<MeshRendererComponent>(entity, mesh, tint);

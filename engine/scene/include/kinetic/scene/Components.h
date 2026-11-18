@@ -5,7 +5,6 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
-#include <array>
 #include <string>
 
 namespace kinetic::scene {
@@ -33,24 +32,14 @@ struct CameraComponent {
     [[nodiscard]] static glm::mat4 view(const TransformComponent& transform);
 };
 
-// Meshes the renderer knows how to draw. Grows as soon as meshes can be loaded from glTF.
-enum class BuiltinMesh : u8 {
-    Triangle,
-    Count,
-};
-
-inline constexpr std::array<const char*, static_cast<usize>(BuiltinMesh::Count)> kBuiltinMeshNames = {
-    "Triangle",
-};
-
-[[nodiscard]] constexpr const char* builtinMeshName(BuiltinMesh mesh)
-{
-    return mesh < BuiltinMesh::Count ? kBuiltinMeshNames[static_cast<usize>(mesh)] : "?";
-}
+// Index into the renderer's mesh library. Mesh 0 is always the built-in triangle; imported
+// meshes (FBX / OBJ) are appended after it.
+using MeshId = u32;
+inline constexpr MeshId kTriangleMesh = 0;
 
 struct MeshRendererComponent {
-    BuiltinMesh mesh = BuiltinMesh::Triangle;
-    glm::vec4 tint{1.0f}; // RGBA, multiplies the mesh colour
+    MeshId mesh = kTriangleMesh;
+    glm::vec4 tint{1.0f}; // RGB multiplies the lit mesh colour (alpha unused for now)
 };
 
 } // namespace kinetic::scene

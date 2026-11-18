@@ -3,7 +3,7 @@
 #
 #   core
 #   animation -> core                  (pure CPU, no SDL / GPU)
-#   assets    -> animation             (glTF import)
+#   assets    -> animation             (glTF import, FBX/OBJ meshes via ufbx)
 #   scene     -> core                  (EnTT)
 #   platform  -> core                  (SDL3 window / input)
 #   gfx       -> platform              (SDL_GPU device, shaders, frames)
@@ -31,7 +31,7 @@ endfunction()
 
 kinetic_add_module(core      PUBLIC_DEPS glm::glm spdlog::spdlog)
 kinetic_add_module(animation PUBLIC_DEPS kinetic::core)
-kinetic_add_module(assets    PUBLIC_DEPS kinetic::animation PRIVATE_DEPS cgltf)
+kinetic_add_module(assets    PUBLIC_DEPS kinetic::animation PRIVATE_DEPS cgltf ufbx)
 kinetic_add_module(scene     PUBLIC_DEPS kinetic::core EnTT::EnTT)
 kinetic_add_module(platform  PUBLIC_DEPS kinetic::core SDL3::SDL3)
 kinetic_add_module(gfx       PUBLIC_DEPS kinetic::platform)
