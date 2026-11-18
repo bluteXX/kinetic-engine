@@ -63,12 +63,12 @@ TEST_CASE("scene factories and active camera")
     CHECK(bool(scene.activeCamera() == entt::null));
 
     const entt::entity camera = scene.createCamera("Camera", {0, 0, 3}, {0, 0, 0});
-    const entt::entity mesh = scene.createMesh("Triangle", BuiltinMesh::Triangle, {1, 0, 0, 1});
+    const entt::entity mesh = scene.createMesh("Triangle", kTriangleMesh, {1, 0, 0, 1});
 
     CHECK(scene.activeCamera() == camera);
     CHECK(scene.registry().all_of<MeshRendererComponent>(mesh));
     CHECK(scene.registry().get<MeshRendererComponent>(mesh).tint == glm::vec4(1, 0, 0, 1));
-    CHECK(std::string(builtinMeshName(BuiltinMesh::Triangle)) == "Triangle");
+    CHECK(scene.registry().get<MeshRendererComponent>(mesh).mesh == kTriangleMesh);
 }
 
 TEST_CASE("eulerDegreesNear stays continuous past 90 degrees on Y")

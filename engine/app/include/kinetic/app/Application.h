@@ -5,6 +5,8 @@
 #include "kinetic/renderer/Renderer.h"
 #include "kinetic/ui/ImGuiLayer.h"
 
+#include <SDL3/SDL_events.h>
+
 namespace kinetic {
 
 struct AppDesc {
@@ -17,11 +19,14 @@ struct AppDesc {
         false;
 #endif
     u64 maxFrames = 0; // > 0: quit after N frames (smoke tests / CI)
+    // true: the scene target follows the window size and is blitted to it (sandbox).
+    // false: the app sizes the scene target and shows it itself, e.g. in an ImGui panel (editor).
+    bool presentScene = true;
 };
 
 struct RenderContext {
     gfx::Frame& frame;
-    SDL_GPURenderPass* pass; // scene pass: colour + depth; UI is drawn afterwards in its own pass
+    SDL_GPURenderPass* pass; // scene pass into the renderer's scene target (colour + depth)
     renderer::Renderer& renderer;
     f32 interpolationAlpha; // 0..1 between the previous and current fixed tick
 };
@@ -44,6 +49,7 @@ public:
 protected:
     virtual bool onInit() { return true; }
     virtual void onShutdown() {}
+    virtual void onEvent(const SDL_Event& /*event*/) {}
     virtual void onFixedUpdate(f32 /*dt*/) {}
     virtual void onUpdate(f32 /*dt*/) {}
     virtual void onImGui() {}

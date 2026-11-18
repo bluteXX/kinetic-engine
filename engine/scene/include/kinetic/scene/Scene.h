@@ -16,7 +16,7 @@ public:
 
     // Convenience factories: entity + Transform + the matching component.
     entt::entity createCamera(std::string name, const glm::vec3& position, const glm::vec3& target);
-    entt::entity createMesh(std::string name, BuiltinMesh mesh, const glm::vec4& tint);
+    entt::entity createMesh(std::string name, MeshId mesh, const glm::vec4& tint);
 
     // The camera the scene is rendered from: the first entity with a CameraComponent, or entt::null.
     [[nodiscard]] entt::entity activeCamera() const;

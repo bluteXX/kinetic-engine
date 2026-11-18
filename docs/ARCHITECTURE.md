@@ -41,11 +41,19 @@ events ─► fixed update ×N ─► update ─► ImGui ─► render
   to interpolate between the last two ticks. Frame time is clamped to 0.25 s to avoid the
   "spiral of death" after a breakpoint.
 - **Frame lifecycle** (`gfx::Device`): acquire command buffer + swapchain → copy passes
-  (ImGui upload, later: skinning matrices) → scene pass (colour + depth, 3D content)
-  → overlay pass (colour only, ImGui) → submit. UI gets its own pass because ImGui's pipeline has
-  no depth format and Metal requires pipeline and pass attachments to match.
+  (ImGui upload, mesh uploads, later: skinning matrices) → scene pass into the offscreen
+  *scene target* (colour + depth) → [sandbox: blit to swapchain] → overlay pass on the swapchain
+  (ImGui) → submit. The editor sizes the scene target to its Viewport panel and draws it there as
+  an ImGui image (`AppDesc::presentScene = false`).
 - **Camera** is an entity with `CameraComponent` + `TransformComponent`; it looks down local −Z.
-  `Renderer::drawScene` renders every `MeshRendererComponent` from the scene's first camera.
+  `Renderer::drawScene` renders the floor grid and every `MeshRendererComponent` from the scene's
+  first camera.
+- **Meshes** live in the renderer's library; `MeshRendererComponent::mesh` is an index into it
+  (0 = built-in triangle). `assets::loadMesh` turns .fbx / .obj into `MeshData` (Y-up, meters,
+  transforms baked, triangulated) via ufbx; `Renderer::addMesh` uploads it.
+- **Editor assets:** the *Assets* drawer loads every .fbx / .obj in `assets/meshes/` on startup
+  (the project folder, so additions end up in the repo). Tiles are ImGui drag & drop sources
+  carrying a `MeshId`; the Viewport and the Inspector's Mesh field accept them.
 
 ## Animation data
 

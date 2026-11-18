@@ -6,25 +6,26 @@ using namespace metal;
 struct DrawUniforms
 {
     float4x4 mvp;
+    float4x4 normalMatrix;
 };
 
 struct main0_out
 {
-    float3 vColor [[user(locn0)]];
+    float3 vNormal [[user(locn0)]];
     float4 gl_Position [[position]];
 };
 
 struct main0_in
 {
     float3 aPosition [[attribute(0)]];
-    float3 aColor [[attribute(1)]];
+    float3 aNormal [[attribute(1)]];
 };
 
 vertex main0_out main0(main0_in in [[stage_in]], constant DrawUniforms& _19 [[buffer(0)]])
 {
     main0_out out = {};
     out.gl_Position = _19.mvp * float4(in.aPosition, 1.0);
-    out.vColor = in.aColor;
+    out.vNormal = float3x3(_19.normalMatrix[0].xyz, _19.normalMatrix[1].xyz, _19.normalMatrix[2].xyz) * in.aNormal;
     return out;
 }
 
