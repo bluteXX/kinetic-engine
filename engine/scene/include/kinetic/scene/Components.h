@@ -40,6 +40,7 @@ inline constexpr MeshId kTriangleMesh = 0;
 struct MeshRendererComponent {
     MeshId mesh = kTriangleMesh;
     glm::vec4 tint{1.0f}; // RGB multiplies the lit mesh colour (alpha unused for now)
+    bool visible = true;
 };
 
 } // namespace kinetic::scene

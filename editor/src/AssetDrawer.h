@@ -1,10 +1,12 @@
 #pragma once
 
+#include <kinetic/animation/Skinning.h>
 #include <kinetic/renderer/Renderer.h>
 
 #include <glm/glm.hpp>
 
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -13,49 +15,58 @@
 
 namespace kinetic::editor {
 
-// One mesh shown in the drawer: the built-in triangle or a file from the meshes folder.
+// One asset shown in the drawer: the built-in triangle, a static mesh file, or an animated model.
 struct MeshAsset {
     std::string name;
-    std::string type; // "BUILT-IN", "FBX", "OBJ"
+    std::string type; // file type: "BUILT-IN", "FBX", "OBJ", "GLB", "GLTF"
     std::filesystem::path path; // empty for built-ins
-    scene::MeshId id = scene::kTriangleMesh;
+    scene::MeshId id = scene::kTriangleMesh; // static meshes only
     u32 triangles = 0;
+    std::shared_ptr<const anim::SkinnedModel> model; // animated models only
+
+    [[nodiscard]] bool animated() const { return model != nullptr; }
 };
 
 // The "Assets" drawer at the bottom of the editor.
 //
-// Shows every mesh in the project's meshes folder (loaded on startup, Refresh picks up new files)
-// plus the built-in triangle. Tiles are ImGui drag & drop sources carrying a scene::MeshId
-// (payload kMeshPayload): drop one on the Viewport to place an object, or on an object's Mesh
-// field in the Inspector to swap its mesh. Double-click a tile to place it in front of the camera.
+// Shows every mesh / model in the project's asset folders (loaded on startup, Refresh picks up
+// new files) plus the built-in triangle. Files with a skin or animation become animated assets.
+// Tiles are ImGui drag & drop sources:
+//   static mesh   -> kMeshPayload  (scene::MeshId): Viewport places it, a Mesh field swaps to it
+//   animated model -> kModelPayload (asset index):  Viewport places an animated object
+// Double-click a tile to place it in front of the camera.
 class AssetDrawer {
 public:
     static constexpr const char* kMeshPayload = "KINETIC_MESH";
+    static constexpr const char* kModelPayload = "KINETIC_MODEL";
 
-    void init(renderer::Renderer& renderer, std::filesystem::path folder);
+    // `folders[0]` receives imported .fbx / .obj files; .glb / .gltf go to the folder named
+    // "models" if there is one.
+    void init(renderer::Renderer& renderer, std::vector<std::filesystem::path> folders);
 
-    // Loads files in the folder that are not loaded yet.
+    // Loads files in the folders that are not loaded yet.
     void refresh();
-    // Copies `source` into the folder (unless it is already there) and loads it.
+    // Copies `source` into an asset folder (unless it is already there) and loads it.
     bool importFile(const std::filesystem::path& source);
 
     void draw();
 
-    // Mesh double-clicked this frame, if any.
-    [[nodiscard]] std::optional<scene::MeshId> takeSpawnRequest() { return std::exchange(m_spawnRequest, std::nullopt); }
+    // Asset double-clicked this frame, if any (index into assets()).
+    [[nodiscard]] std::optional<usize> takeSpawnRequest() { return std::exchange(m_spawnRequest, std::nullopt); }
 
-    [[nodiscard]] const std::filesystem::path& folder() const { return m_folder; }
     [[nodiscard]] const std::vector<MeshAsset>& assets() const { return m_assets; }
+    [[nodiscard]] const MeshAsset* asset(usize index) const { return index < m_assets.size() ? &m_assets[index] : nullptr; }
 
 private:
     bool loadFile(const std::filesystem::path& path);
-    void drawTile(const MeshAsset& asset, f32 size);
+    void drawTile(usize index, f32 size);
+    [[nodiscard]] std::filesystem::path importFolderFor(const std::filesystem::path& file) const;
 
     renderer::Renderer* m_renderer = nullptr;
-    std::filesystem::path m_folder;
+    std::vector<std::filesystem::path> m_folders;
     std::vector<MeshAsset> m_assets;
     std::set<std::filesystem::path> m_loaded; // canonical paths already in the library
-    std::optional<scene::MeshId> m_spawnRequest;
+    std::optional<usize> m_spawnRequest;
     std::string m_status;
 };
 

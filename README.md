@@ -18,6 +18,15 @@ Milestone 1 — foundations:
 - [x] glTF skeleton + animation import (cgltf)
 - [x] Unit tests (doctest) + CI on macOS and Windows
 
+Milestone 3 — animation (in progress):
+
+- [x] Animated model import: glTF (.glb / .gltf) and FBX skins + clips (FBX takes baked via ufbx)
+- [x] CPU linear blend skinning, per-object dynamic meshes
+- [x] `AnimationPlayer`: play / pause / loop / speed (incl. reverse) / crossfade between clips
+- [x] Editor *Animation* panel: clips, transport, timeline with keyframes + scrubbing, skeleton
+      overlay, bind pose, joint hierarchy
+- [ ] GPU skinning (needs the Vulkan SDK for shader compilation)
+
 See the [roadmap](#roadmap) for what comes next.
 
 ## Building
@@ -74,7 +83,7 @@ Design notes: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 1. ~~Window, triangle, ImGui, CI~~
 2. ~~Camera, depth buffer, offscreen viewport in the editor, FBX / OBJ mesh import, floor grid + axis gizmo~~
-3. Debug draw (skeletons, transform gizmos), glTF meshes
+3. Animation playback: skinned glTF / FBX models, Animation panel, skeleton debug draw (done); transform gizmos
 4. GPU skinning
 5. Blend trees + animation state machine
 6. IK (two-bone, FABRIK), foot placement

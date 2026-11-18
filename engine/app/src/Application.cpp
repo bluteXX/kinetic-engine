@@ -123,7 +123,8 @@ void Application::renderFrame(f32 alpha)
 {
     gfx::Frame frame = m_device.beginFrame();
     if (frame.cmd && frame.swapchain) {
-        m_imgui.prepare(frame.cmd); // copy pass, must precede the render passes
+        m_imgui.prepare(frame.cmd);              // copy pass, must precede the render passes
+        m_renderer.uploadPendingData(frame.cmd); // skinned meshes, overlay lines
 
         if (m_desc.presentScene) {
             m_renderer.resizeSceneTarget(frame.width, frame.height);
