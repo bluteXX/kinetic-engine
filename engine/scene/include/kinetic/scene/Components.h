@@ -43,4 +43,19 @@ struct MeshRendererComponent {
     bool visible = true;
 };
 
+// Static box collider for gameplay / physics (e.g. floor, stones). `offset` is the box centre
+// relative to the entity origin; both scale with the entity's transform.
+struct ColliderComponent {
+    glm::vec3 halfExtents{0.5f};
+    glm::vec3 offset{0.0f};
+};
+
+// A playable, physically simulated character (see the editor's Play mode). The entity also has
+// an AnimatorComponent whose model is the character rig.
+struct CharacterComponent {
+    f32 walkSpeed = 1.6f;    // m/s
+    f32 runSpeed = 3.6f;     // m/s
+    f32 strength = 1.0f;     // multiplies every muscle's strength
+};
+
 } // namespace kinetic::scene

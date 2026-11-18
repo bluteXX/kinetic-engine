@@ -93,6 +93,8 @@ void updateAnimations(scene::Scene& scene, Renderer& renderer, f32 dt)
 
         if (a.bindPose) {
             a.localPose = model.skeleton.restPose();
+        } else if (a.externalPose && a.localPose.jointCount() == jointCount) {
+            // pose provided externally (physics)
         } else {
             a.player.update(dt, model.clips);
             a.player.evaluate(model.skeleton, model.clips, a.localPose, a.scratchPose);

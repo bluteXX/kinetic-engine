@@ -32,6 +32,8 @@ bool isAssetFile(const std::filesystem::path& path)
 
 ImVec4 tileColor(const MeshAsset& asset)
 {
+    if (asset.preset == "character") return {0.15f, 0.62f, 0.62f, 1.0f};
+    if (asset.isPreset()) return {0.45f, 0.45f, 0.42f, 1.0f};
     if (asset.animated()) return {0.62f, 0.38f, 0.85f, 1.0f};
     if (asset.type == "FBX") return {0.80f, 0.47f, 0.20f, 1.0f};
     if (asset.type == "OBJ") return {0.27f, 0.62f, 0.38f, 1.0f};
@@ -58,6 +60,16 @@ void AssetDrawer::init(renderer::Renderer& renderer, std::vector<std::filesystem
 
     m_assets.push_back({"Triangle", "BUILT-IN", {}, scene::kTriangleMesh, 1, nullptr});
     refresh();
+}
+
+void AssetDrawer::addPreset(MeshAsset asset)
+{
+    // Keep presets together right after the built-in triangle.
+    auto it = m_assets.begin();
+    while (it != m_assets.end() && (it->type == "BUILT-IN" || it->isPreset())) {
+        ++it;
+    }
+    m_assets.insert(it, std::move(asset));
 }
 
 void AssetDrawer::refresh()
@@ -235,7 +247,12 @@ void AssetDrawer::drawTile(usize index, f32 size)
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(color.x * 0.55f, color.y * 0.55f, color.z * 0.55f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(color.x * 0.75f, color.y * 0.75f, color.z * 0.75f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, color);
-    const std::string label = asset.animated() ? asset.type + "\nANIM" : asset.type;
+    std::string label = asset.animated() ? asset.type + "\nANIM" : asset.type;
+    if (asset.preset == "character") {
+        label = "CHARACTER\nPHYS";
+    } else if (asset.isPreset()) {
+        label = "PRESET\n" + asset.name;
+    }
     ImGui::Button(label.c_str(), ImVec2(size, size * 0.72f));
     ImGui::PopStyleColor(3);
 
@@ -253,9 +270,19 @@ void AssetDrawer::drawTile(usize index, f32 size)
         ImGui::Text("%s", asset.name.c_str());
         ImGui::TextDisabled("%s, %u triangles", asset.type.c_str(), asset.triangles);
         glm::vec3 extent(0.0f);
+        if (asset.preset == "character") {
+            ImGui::TextDisabled("Playable physics character (Play: WASD, LMB attack, R ragdoll)");
+        } else if (asset.preset == "floor" || asset.preset == "stone") {
+            ImGui::TextDisabled("Static box collider");
+        }
         if (asset.animated()) {
             ImGui::TextDisabled("Animated: %zu joints, %zu clip(s)", asset.model->skeleton.jointCount(),
                                 asset.model->clips.size());
+            for (const anim::AnimationClip& clip : asset.model->clips) {
+                const bool physics = clip.kind() == anim::ClipKind::Physics;
+                ImGui::TextColored(physics ? ImVec4(1.0f, 0.6f, 0.25f, 1.0f) : ImVec4(0.45f, 0.7f, 1.0f, 1.0f), "  %s %s",
+                                   physics ? "[PHYS]" : "[KIN] ", clip.name().c_str());
+            }
             extent = asset.model->restBoundsMax - asset.model->restBoundsMin;
         } else if (const renderer::GpuMesh* mesh = m_renderer->mesh(asset.id)) {
             extent = mesh->boundsMax - mesh->boundsMin;

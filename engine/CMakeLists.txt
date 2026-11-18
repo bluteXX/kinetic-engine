@@ -7,6 +7,7 @@
 #   scene     -> animation             (EnTT; animator component)
 #   platform  -> core                  (SDL3 window / input)
 #   gfx       -> platform              (SDL_GPU device, shaders, frames)
+#   physics   -> core                  (Jolt, hidden behind PhysicsWorld)
 #   renderer  -> gfx, scene
 #   ui        -> gfx                   (Dear ImGui)
 #   app       -> renderer, ui          (main loop)
@@ -35,6 +36,7 @@ kinetic_add_module(assets    PUBLIC_DEPS kinetic::animation PRIVATE_DEPS cgltf u
 kinetic_add_module(scene     PUBLIC_DEPS kinetic::animation EnTT::EnTT)
 kinetic_add_module(platform  PUBLIC_DEPS kinetic::core SDL3::SDL3)
 kinetic_add_module(gfx       PUBLIC_DEPS kinetic::platform)
+kinetic_add_module(physics   PUBLIC_DEPS kinetic::core PRIVATE_DEPS Jolt)
 kinetic_add_module(renderer  PUBLIC_DEPS kinetic::gfx kinetic::scene)
 kinetic_add_module(ui        PUBLIC_DEPS kinetic::gfx imgui)
 kinetic_add_module(app       PUBLIC_DEPS kinetic::renderer kinetic::ui)
@@ -48,7 +50,7 @@ target_compile_definitions(kinetic_core PUBLIC
 add_library(kinetic_engine INTERFACE)
 add_library(kinetic::engine ALIAS kinetic_engine)
 target_link_libraries(kinetic_engine INTERFACE
-    kinetic::app kinetic::assets kinetic::animation kinetic::scene)
+    kinetic::app kinetic::assets kinetic::animation kinetic::scene kinetic::physics)
 
 if(MSVC)
     # /Zc:preprocessor -> standard preprocessor (__VA_OPT__), /utf-8 -> required by fmt/spdlog

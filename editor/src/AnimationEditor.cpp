@@ -243,13 +243,22 @@ void AnimationEditor::drawClipList(scene::AnimatorComponent& animator)
     for (usize i = 0; i < model.clips.size(); ++i) {
         const anim::AnimationClip& clip = model.clips[i];
         const bool current = animator.player.clip() == static_cast<i32>(i);
+        const bool physics = clip.kind() == anim::ClipKind::Physics;
         ImGui::PushID(static_cast<int>(i));
+        if (physics) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.65f, 0.3f, 1.0f));
+        }
         if (ImGui::Selectable(clip.name().c_str(), current, ImGuiSelectableFlags_AllowOverlap)) {
             animator.bindPose = false;
             animator.player.play(static_cast<i32>(i), current ? 0.0f : m_crossfade);
         }
+        if (physics) {
+            ImGui::PopStyleColor();
+        }
+        tooltip(physics ? "Physics animation: in Play the muscles follow it (hits, rebounds)"
+                        : "Regular (kinematic) animation");
         char duration[32];
-        std::snprintf(duration, sizeof(duration), "%.2fs", static_cast<double>(clip.duration()));
+        std::snprintf(duration, sizeof(duration), "%s %.2fs", physics ? "PHYS" : "KIN", static_cast<double>(clip.duration()));
         ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - ImGui::CalcTextSize(duration).x);
         ImGui::TextDisabled("%s", duration);
         ImGui::PopID();
@@ -393,12 +402,13 @@ void AnimationEditor::drawTimeline(scene::AnimatorComponent& animator)
     }
     draw->AddLine(ImVec2(x0, rulerY), ImVec2(x1, rulerY), kTickMinor);
 
-    // Keyframes (union over every joint and channel).
+    // Keyframes (union over every joint and channel); orange for physics clips.
+    const bool physicsClip = clip.kind() == anim::ClipKind::Physics;
     const f32 keyY = p0.y + 34.0f;
     for (const f32 t : keyTimes(clip)) {
         const f32 x = timeToX(t);
         draw->AddQuadFilled(ImVec2(x, keyY - 4.0f), ImVec2(x + 4.0f, keyY), ImVec2(x, keyY + 4.0f), ImVec2(x - 4.0f, keyY),
-                            kKeyColor);
+                            physicsClip ? IM_COL32(255, 150, 60, 255) : kKeyColor);
     }
 
     // Playhead.
@@ -419,6 +429,10 @@ void AnimationEditor::drawTimeline(scene::AnimatorComponent& animator)
     if (player.isFading()) {
         ImGui::SameLine();
         ImGui::TextDisabled("|  crossfade %.0f%%", static_cast<double>(player.fadeWeight() * 100.0f));
+    }
+    if (physicsClip) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.3f, 1.0f), "|  PHYSICS clip: muscle targets (simulated in Play)");
     }
 }
 

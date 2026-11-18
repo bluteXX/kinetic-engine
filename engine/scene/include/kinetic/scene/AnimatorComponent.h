@@ -18,6 +18,9 @@ struct AnimatorComponent {
     MeshId restMesh = kTriangleMesh;
     anim::AnimationPlayer player;
     bool bindPose = false; // true: show the rest pose instead of the animation
+    // true: localPose is written by someone else (e.g. a physics simulation) and only skinned;
+    // the player is not evaluated.
+    bool externalPose = false;
 
     // Results of the last evaluation (written by the animation system, read by UI / debug draw).
     anim::Pose localPose;
