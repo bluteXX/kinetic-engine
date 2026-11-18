@@ -131,6 +131,17 @@ events ─► fixed update ×N ─► update ─► ImGui ─► render
   (incl. J^T F per joint), the hit list with per-joint distribution, graphs, muscle tuning,
   pause / step / slow motion / freeze on hit.
 
+- **Clip kinds** (`anim::ClipKind`): *Kinematic* clips are shown as sampled; *Physics* clips are
+  targets for the muscles of a simulated body. The editor marks them [KIN] (blue) / [PHYS] (orange)
+  in the Inspector, the Animation Editor and the Assets tooltips.
+- **Play mode** (`editor/src/PlayMode`, F5): a physics world is built from the scene's
+  `ColliderComponent`s (static boxes) and `CharacterComponent`s. A character (`CharacterRig`:
+  16 bodies, hinges + swing-twist joints, masses / strengths from biomechanics) is kinematic while
+  walking (bodies follow Idle / Walk via `moveKinematic`); an attack makes the sword arm dynamic and
+  its muscles follow the Strike clip with the hit reaction; R makes every body dynamic (limp
+  ragdoll). The simulated bodies are written back as the AnimatorComponent's local pose
+  (`externalPose`) and skinned like any other model. Stop restores every transform.
+
 ## Graphics
 
 - **SDL_GPU** abstracts Metal / Vulkan / D3D12. The device asks for SPIR-V and MSL, so the

@@ -32,7 +32,10 @@ Milestone 4 — physics-driven animation (in progress):
 - [x] Jolt Physics (`physics` module): bodies, CCD, hinges with muscles (torque-limited motors), welds
 - [x] Force measurement: joint forces, muscle torques, exact contact forces, J^T F check
 - [x] Sword-vs-stone prototype with debug vectors, hit analysis and graphs (Physics menu)
-- [ ] Ragdoll from the skeleton, powered ragdoll, reactions, Hill-type muscles
+- [x] Hit reaction: restitution, reflex delay, recover blend
+- [x] Play mode (F5): physics character preset (16-body ragdoll), walk / idle (kinematic clips),
+      physics strike (muscles follow the clip), R = full ragdoll; Floor / Stone presets
+- [ ] Powered full-body ragdoll with balance, get-up, Hill-type muscles
 
 See the [roadmap](#roadmap) for what comes next.
 

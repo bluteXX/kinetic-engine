@@ -23,8 +23,10 @@ struct MeshAsset {
     scene::MeshId id = scene::kTriangleMesh; // static mesh (animated models: their rest pose)
     u32 triangles = 0;
     std::shared_ptr<const anim::SkinnedModel> model; // animated models only
+    std::string preset; // built-in presets: "character", "floor", "stone" (empty for files)
 
     [[nodiscard]] bool animated() const { return model != nullptr; }
+    [[nodiscard]] bool isPreset() const { return !preset.empty(); }
 };
 
 // The "Assets" drawer at the bottom of the editor.
@@ -41,6 +43,9 @@ public:
     // `folders[0]` receives imported .fbx / .obj files; .glb / .gltf go to the folder named
     // "models" if there is one.
     void init(renderer::Renderer& renderer, std::vector<std::filesystem::path> folders);
+
+    // Built-in preset (shown first, after the triangle).
+    void addPreset(MeshAsset asset);
 
     // Loads files in the folders that are not loaded yet.
     void refresh();

@@ -60,6 +60,22 @@ struct BodyDesc {
     u32 collisionGroup = 0;
 };
 
+// Ball-and-socket joint with a cone and twist limits (hips, shoulders, spine, neck).
+// The twist axis runs along the child bone; the cone opens around it.
+struct SwingTwistDesc {
+    std::string name;
+    BodyId parent;
+    BodyId child;
+    glm::vec3 anchor{0.0f};                     // world space
+    glm::vec3 twistAxis{0.0f, -1.0f, 0.0f};     // world space, along the child bone
+    glm::vec3 planeAxis{1.0f, 0.0f, 0.0f};      // world space, perpendicular to twistAxis
+    f32 normalHalfCone = 0.8f;                  // rad
+    f32 planeHalfCone = 0.8f;                   // rad
+    f32 twistMin = -0.5f;                       // rad
+    f32 twistMax = 0.5f;                        // rad
+    f32 friction = 0.0f;                        // N m, joint friction (limp ragdolls look less floppy)
+};
+
 // Muscle model v1: position motor with a spring and a torque limit.
 //   torque = clamp(stiffness * (target - angle) - damping * angularVelocity, -maxTorque, maxTorque)
 struct Muscle {
@@ -83,6 +99,7 @@ struct HingeDesc {
     f32 limitMin = -glm::pi<f32>(); // rad, in [-pi, 0]
     f32 limitMax = glm::pi<f32>();  // rad, in [0, pi]
     Muscle muscle;
+    f32 friction = 0.0f; // N m, joint friction while the muscle is off
 };
 
 // Rigid weld (a hand gripping a sword).
@@ -143,6 +160,15 @@ public:
     BodyId addBody(const BodyDesc& desc);
     JointId addHinge(const HingeDesc& desc);
     JointId addFixed(const FixedDesc& desc);
+    JointId addSwingTwist(const SwingTwistDesc& desc);
+
+    // Kinematic / dynamic switching (static bodies stay static).
+    void setMotionType(BodyId body, MotionType motion);
+    // Kinematic bodies: reach this transform at the end of the next step of length dt (gives the
+    // body the velocity needed, so it pushes dynamic bodies correctly).
+    void moveKinematic(BodyId body, const glm::vec3& position, const glm::quat& rotation, f32 dt);
+    // Instantly place a body (no velocity), e.g. when a ragdoll is reset.
+    void teleport(BodyId body, const glm::vec3& position, const glm::quat& rotation);
 
     void setMuscle(JointId joint, const Muscle& muscle);
     // Contact material. Jolt combines two bodies' restitution with max() and friction with sqrt(a b).

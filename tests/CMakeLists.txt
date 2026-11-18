@@ -11,7 +11,10 @@ add_executable(kinetic_tests
     core/RayTests.cpp
     physics/PhysicsWorldTests.cpp
     physics/SwordStrikeTests.cpp
-    ${CMAKE_SOURCE_DIR}/editor/src/SwordStrikeTest.cpp)
+    game/PlayModeTests.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/SwordStrikeTest.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/CharacterRig.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/PlayMode.cpp)
 target_link_libraries(kinetic_tests PRIVATE kinetic::animation kinetic::assets kinetic::scene kinetic::physics
     kinetic::renderer imgui doctest::doctest)
 target_include_directories(kinetic_tests PRIVATE ${CMAKE_SOURCE_DIR}/editor/src) # editor prototypes under test

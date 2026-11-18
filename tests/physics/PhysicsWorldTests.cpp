@@ -150,3 +150,61 @@ TEST_CASE("Contact force on a resting box is reconstructed as its weight")
     CHECK(std::abs(s.contactPoint.y) < 0.05f);
     CHECK_FALSE(world.contacts().empty());
 }
+
+TEST_CASE("Kinematic bodies follow targets, switch to dynamic, swing-twist joints hold")
+{
+    PhysicsWorld world;
+    REQUIRE(world.init());
+    world.setGravity({0.0f, -kG, 0.0f});
+
+    BodyDesc parentDesc;
+    parentDesc.shape.halfExtents = glm::vec3(0.1f);
+    parentDesc.position = {0.0f, 2.0f, 0.0f};
+    parentDesc.motion = MotionType::Kinematic;
+    parentDesc.mass = 5.0f;
+    parentDesc.collisionGroup = 7;
+    const BodyId parent = world.addBody(parentDesc);
+
+    BodyDesc childDesc;
+    childDesc.shape.type = ShapeType::Capsule;
+    childDesc.shape.radius = 0.05f;
+    childDesc.shape.halfHeight = 0.15f;
+    childDesc.shape.offset = {0.0f, -0.2f, 0.0f};
+    childDesc.position = {0.0f, 1.9f, 0.0f};
+    childDesc.motion = MotionType::Kinematic;
+    childDesc.mass = 2.0f;
+    childDesc.collisionGroup = 7;
+    const BodyId child = world.addBody(childDesc);
+    CHECK(world.body(child).mass == doctest::Approx(2.0f));
+
+    SwingTwistDesc joint;
+    joint.parent = parent;
+    joint.child = child;
+    joint.anchor = {0.0f, 1.9f, 0.0f};
+    joint.twistAxis = {0.0f, -1.0f, 0.0f};
+    joint.planeAxis = {1.0f, 0.0f, 0.0f};
+    const JointId j = world.addSwingTwist(joint);
+    REQUIRE(j.valid());
+
+    // Kinematic: moves to its target exactly, ignores gravity.
+    for (int i = 0; i < 24; ++i) {
+        world.moveKinematic(parent, {0.0f, 2.0f, 0.1f * static_cast<f32>(i + 1) / 24.0f}, glm::quat(1, 0, 0, 0), kDt);
+        world.moveKinematic(child, {0.0f, 1.9f, 0.1f * static_cast<f32>(i + 1) / 24.0f}, glm::quat(1, 0, 0, 0), kDt);
+        world.step(kDt);
+    }
+    CHECK(world.body(parent).position.z == doctest::Approx(0.1f).epsilon(0.01));
+    CHECK(world.body(child).position.y == doctest::Approx(1.9f).epsilon(0.001));
+
+    // Dynamic child: hangs from the kinematic parent; the joint carries its weight.
+    world.setMotionType(child, MotionType::Dynamic);
+    for (int i = 0; i < 480; ++i) {
+        world.step(kDt);
+    }
+    CHECK(world.body(child).position.y == doctest::Approx(1.9f).epsilon(0.01)); // still attached
+    CHECK(world.joint(j).force.y == doctest::Approx(2.0f * kG).epsilon(0.05));
+
+    // Teleport puts a body anywhere at rest.
+    world.setMotionType(parent, MotionType::Dynamic);
+    world.teleport(parent, {3.0f, 5.0f, 0.0f}, glm::quat(1, 0, 0, 0));
+    CHECK(world.body(parent).position.x == doctest::Approx(3.0f));
+}

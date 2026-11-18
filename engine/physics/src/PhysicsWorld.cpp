@@ -22,6 +22,7 @@
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
 #include <Jolt/Physics/Constraints/HingeConstraint.h>
+#include <Jolt/Physics/Constraints/SwingTwistConstraint.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/RegisterTypes.h>
@@ -177,12 +178,14 @@ struct PhysicsWorld::Impl {
         BodyState state;
         glm::vec3 velocityBefore{0.0f};
     };
+    enum class JointType : u8 { Hinge, Fixed, SwingTwist };
     struct Joint {
         std::string name;
         BodyId parent;
         BodyId child;
         JPH::Ref<JPH::TwoBodyConstraint> constraint;
         bool hinge = true;
+        JointType type = JointType::Hinge;
         Muscle muscle;
         f32 target = 0.0f;
         JointState state;
@@ -247,10 +250,13 @@ struct PhysicsWorld::Impl {
                 s.muscleTorque = hinge->GetTotalLambdaMotor() / dt;
                 s.limitTorque = hinge->GetTotalLambdaRotationLimits() / dt;
                 s.torque = s.axis * (s.muscleTorque + s.limitTorque);
-            } else {
+            } else if (joint.type == JointType::Fixed) {
                 auto* fixed = static_cast<JPH::FixedConstraint*>(joint.constraint.GetPtr());
                 s.force = toGlm(fixed->GetTotalLambdaPosition()) / dt;
                 s.torque = toGlm(fixed->GetTotalLambdaRotation()) / dt;
+            } else {
+                auto* swing = static_cast<JPH::SwingTwistConstraint*>(joint.constraint.GetPtr());
+                s.force = toGlm(swing->GetTotalLambdaPosition()) / dt;
             }
         }
 
@@ -388,6 +394,7 @@ BodyId PhysicsWorld::addBody(const BodyDesc& desc)
         settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
         settings.mMassPropertiesOverride.mMass = desc.mass;
     }
+    settings.mAllowDynamicOrKinematic = desc.motion != MotionType::Static;
     if (desc.collisionGroup != 0) {
         settings.mCollisionGroup = JPH::CollisionGroup(w.groupFilter.GetPtr(), desc.collisionGroup, 0);
     }
@@ -403,9 +410,10 @@ BodyId PhysicsWorld::addBody(const BodyDesc& desc)
     Impl::Body body;
     body.desc = desc;
     body.id = id;
-    if (desc.motion == MotionType::Dynamic) {
+    if (desc.motion != MotionType::Static) {
         const JPH::BodyLockRead lock(w.system->GetBodyLockInterface(), id);
-        body.state.mass = 1.0f / lock.GetBody().GetMotionProperties()->GetInverseMass();
+        const f32 inverseMass = lock.GetBody().GetMotionPropertiesUnchecked()->GetInverseMassUnchecked();
+        body.state.mass = inverseMass > 0.0f ? 1.0f / inverseMass : 0.0f;
     }
     w.bodies.push_back(body);
     w.readStates(1.0f);
@@ -423,6 +431,7 @@ JointId PhysicsWorld::addHinge(const HingeDesc& desc)
     settings.mNormalAxis2 = toJolt(glm::normalize(desc.referenceChild));
     settings.mLimitsMin = desc.limitMin;
     settings.mLimitsMax = desc.limitMax;
+    settings.mMaxFrictionTorque = desc.friction;
 
     JPH::TwoBodyConstraint* constraint = w.system->GetBodyInterface().CreateConstraint(
         &settings, w.bodies[desc.parent.index].id, w.bodies[desc.child.index].id);
@@ -465,10 +474,74 @@ JointId PhysicsWorld::addFixed(const FixedDesc& desc)
     joint.child = desc.child;
     joint.constraint = constraint;
     joint.hinge = false;
+    joint.type = Impl::JointType::Fixed;
     joint.muscle.enabled = false;
     joint.state.hinge = false;
     w.joints.push_back(joint);
     return JointId{static_cast<u32>(w.joints.size() - 1)};
+}
+
+JointId PhysicsWorld::addSwingTwist(const SwingTwistDesc& desc)
+{
+    Impl& w = *m_impl;
+    JPH::SwingTwistConstraintSettings settings;
+    settings.mSpace = JPH::EConstraintSpace::WorldSpace;
+    settings.mPosition1 = settings.mPosition2 = JPH::RVec3(toJolt(desc.anchor));
+    settings.mTwistAxis1 = settings.mTwistAxis2 = toJolt(glm::normalize(desc.twistAxis));
+    settings.mPlaneAxis1 = settings.mPlaneAxis2 = toJolt(glm::normalize(desc.planeAxis));
+    settings.mNormalHalfConeAngle = desc.normalHalfCone;
+    settings.mPlaneHalfConeAngle = desc.planeHalfCone;
+    settings.mTwistMinAngle = desc.twistMin;
+    settings.mTwistMaxAngle = desc.twistMax;
+    settings.mMaxFrictionTorque = desc.friction;
+
+    JPH::TwoBodyConstraint* constraint = w.system->GetBodyInterface().CreateConstraint(
+        &settings, w.bodies[desc.parent.index].id, w.bodies[desc.child.index].id);
+    if (!constraint) {
+        return {};
+    }
+    w.system->AddConstraint(constraint);
+
+    Impl::Joint joint;
+    joint.name = desc.name;
+    joint.parent = desc.parent;
+    joint.child = desc.child;
+    joint.constraint = constraint;
+    joint.hinge = false;
+    joint.type = Impl::JointType::SwingTwist;
+    joint.muscle.enabled = false;
+    joint.state.hinge = false;
+    w.joints.push_back(joint);
+    return JointId{static_cast<u32>(w.joints.size() - 1)};
+}
+
+void PhysicsWorld::setMotionType(BodyId body, MotionType motion)
+{
+    Impl::Body& b = m_impl->bodies[body.index];
+    if (b.desc.motion == MotionType::Static || motion == MotionType::Static || b.desc.motion == motion) {
+        return;
+    }
+    b.desc.motion = motion;
+    m_impl->system->GetBodyInterface().SetMotionType(
+        b.id, motion == MotionType::Kinematic ? JPH::EMotionType::Kinematic : JPH::EMotionType::Dynamic,
+        JPH::EActivation::Activate);
+}
+
+void PhysicsWorld::moveKinematic(BodyId body, const glm::vec3& position, const glm::quat& rotation, f32 dt)
+{
+    m_impl->system->GetBodyInterface().MoveKinematic(m_impl->bodies[body.index].id, JPH::RVec3(toJolt(position)),
+                                                     toJolt(glm::normalize(rotation)), dt);
+}
+
+void PhysicsWorld::teleport(BodyId body, const glm::vec3& position, const glm::quat& rotation)
+{
+    JPH::BodyInterface& bi = m_impl->system->GetBodyInterface();
+    const JPH::BodyID id = m_impl->bodies[body.index].id;
+    bi.SetPositionAndRotation(id, JPH::RVec3(toJolt(position)), toJolt(glm::normalize(rotation)), JPH::EActivation::Activate);
+    bi.SetLinearAndAngularVelocity(id, JPH::Vec3::sZero(), JPH::Vec3::sZero());
+    BodyState& state = m_impl->bodies[body.index].state;
+    state.position = position;
+    state.rotation = rotation;
 }
 
 void PhysicsWorld::setMuscle(JointId id, const Muscle& muscle)

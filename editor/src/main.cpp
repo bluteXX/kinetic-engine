@@ -21,9 +21,13 @@
 
 #include "AnimationEditor.h"
 #include "AssetDrawer.h"
+#include "CharacterRig.h"
+#include "PlayMode.h"
 #include "SwordStrikeTest.h"
 
+#include <kinetic/animation/PoseOps.h>
 #include <kinetic/app/Application.h>
+#include <kinetic/core/Primitives.h>
 #include <kinetic/core/Log.h>
 #include <kinetic/renderer/AnimationSystem.h>
 #include <kinetic/renderer/Picking.h>
@@ -123,10 +127,16 @@ public:
 protected:
     bool onInit() override
     {
-        m_camera = m_scene.createCamera("Camera", {0.0f, 1.2f, 3.5f}, {0.0f, 0.3f, 0.0f});
-        m_selected = m_scene.createMesh("Triangle", scene::kTriangleMesh, glm::vec4(kPalette[0], 1.0f));
-        m_scene.registry().get<scene::TransformComponent>(m_selected).position = {0.0f, 0.4f, 0.0f};
+        m_camera = m_scene.createCamera("Camera", {0.0f, 1.6f, 4.0f}, {0.0f, 0.8f, 0.0f});
         m_drawer.init(renderer(), {assetsRoot() / "meshes", assetsRoot() / "models"});
+        addPresets();
+        // Start with a floor to walk on.
+        for (usize i = 0; i < m_drawer.assets().size(); ++i) {
+            if (m_drawer.assets()[i].preset == "floor") {
+                spawnAsset(i, glm::vec3(0.0f));
+            }
+        }
+        m_selected = entt::null;
         return true;
     }
 
@@ -192,8 +202,20 @@ protected:
                 ImGui::MenuItem("Skeleton of Selection", nullptr, &m_showSkeleton);
                 ImGui::MenuItem("Selection Outline", nullptr, &m_showSelectionBox);
                 ImGui::MenuItem("Grid", nullptr, &m_showGrid);
+                ImGui::MenuItem("Play: Physics Vectors", nullptr, &m_play.showDebug);
+                ImGui::MenuItem("Play: Body Centres", nullptr, &m_play.showShapes);
                 ImGui::EndMenu();
             }
+            // Play / Stop, centred in the menu bar.
+            const char* playLabel = m_play.active() ? "  Stop (Esc)  " : "  Play (F5)  ";
+            ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX() + 20.0f,
+                                          (ImGui::GetWindowWidth() - ImGui::CalcTextSize(playLabel).x) * 0.5f));
+            ImGui::PushStyleColor(ImGuiCol_Button, m_play.active() ? ImVec4(0.75f, 0.25f, 0.2f, 1.0f) : ImVec4(0.2f, 0.55f, 0.3f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, m_play.active() ? ImVec4(0.9f, 0.3f, 0.25f, 1.0f) : ImVec4(0.25f, 0.7f, 0.38f, 1.0f));
+            if (ImGui::Button(playLabel)) {
+                togglePlay();
+            }
+            ImGui::PopStyleColor(2);
             ImGui::EndMainMenuBar();
         }
 
@@ -213,6 +235,14 @@ protected:
 
         // After the UI, so scrubbing / clip changes / physics controls show up this frame.
         m_swordTest.update(ImGui::GetIO().DeltaTime, m_scene);
+        if (m_play.active()) {
+            m_playInput.cameraYaw = m_play.cameraYaw();
+            m_play.update(ImGui::GetIO().DeltaTime, m_playInput, m_scene);
+            m_play.updateCamera(m_scene, m_playOrbit, m_playWheel);
+        }
+        m_playInput = {};
+        m_playOrbit = glm::vec2(0.0f);
+        m_playWheel = 0.0f;
         renderer::updateAnimations(m_scene, renderer(), ImGui::GetIO().DeltaTime);
         std::vector<renderer::DebugVertex> overlay;
         if (m_showSkeleton && isAnimated(m_selected)) {
@@ -226,6 +256,7 @@ protected:
             renderer::appendBoxLines(overlay, boxMin - pad, boxMax + pad, kSelectionColor);
         }
         m_swordTest.appendDebugLines(overlay);
+        m_play.appendDebugLines(overlay);
         renderer().setOverlayLines(std::move(overlay));
         m_animationEditor.updateOverlay(m_scene, renderer());
     }
@@ -295,7 +326,7 @@ private:
 
         // One invisible button over the whole image: it owns mouse input, so dragging inside the
         // viewport never moves or undocks the window.
-        ImGui::InvisibleButton("##viewport", size, ImGuiButtonFlags_MouseButtonLeft);
+        ImGui::InvisibleButton("##viewport", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
         const bool hovered = ImGui::IsItemHovered();
         const bool active = ImGui::IsItemActive();
 
@@ -324,6 +355,24 @@ private:
             const glm::mat4 viewProjection = registry.get<scene::CameraComponent>(cam).projection(size.x / size.y) *
                                              scene::CameraComponent::view(registry.get<scene::TransformComponent>(cam));
             m_swordTest.drawViewportLabels(drawList, viewProjection, p0, size);
+        }
+
+        if (m_play.active()) {
+            // Play: LMB attacks, RMB drag orbits the camera, wheel zooms; the editor camera is off.
+            const ImGuiIO& io = ImGui::GetIO();
+            if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                m_playInput.attack = true;
+            }
+            if ((hovered || active) && ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+                m_playOrbit += glm::vec2(io.MouseDelta.x, io.MouseDelta.y);
+            }
+            if (hovered) {
+                m_playWheel += io.MouseWheel;
+            }
+            drawList->AddRect(p0, p1, IM_COL32(80, 200, 110, 255), 0.0f, 0, 3.0f);
+            m_play.drawHud(drawList, p0, size);
+            ImGui::End();
+            return;
         }
 
         const bool gizmoClicked = drawAxisGizmo(drawList, p0, p1, hovered);
@@ -484,6 +533,10 @@ private:
         // Copy the bounds now: enableAnimation adds a mesh, which may reallocate the mesh library.
         const glm::vec3 boundsMin = mesh->boundsMin;
         const glm::vec3 boundsMax = mesh->boundsMax;
+        if (asset->isPreset()) {
+            spawnPreset(*asset, groundPoint);
+            return;
+        }
         const glm::vec3 tint = kPalette[m_objectCounter % kPalette.size()];
         const std::string name = asset->id == scene::kTriangleMesh ? "Actor " + std::to_string(m_objectCounter) : asset->name;
         const entt::entity entity = m_scene.createMesh(name, asset->id, glm::vec4(tint, 1.0f));
@@ -492,6 +545,83 @@ private:
             renderer::enableAnimation(m_scene, renderer(), entity, asset->model);
         }
         placeEntity(entity, boundsMin, boundsMax, groundPoint);
+    }
+
+    // Built-in presets: the physics character, a floor and a stone (both static box colliders).
+    void addPresets()
+    {
+        // Character: its static mesh shows the idle pose (the rest pose has the sword in the floor).
+        auto model = editor::character::buildModel();
+        {
+            anim::Pose pose = model->skeleton.restPose();
+            model->clips[editor::character::kIdle].sample(0.0f, true, pose);
+            std::vector<glm::mat4> world(model->skeleton.jointCount());
+            std::vector<glm::mat4> skin(model->skeleton.jointCount());
+            anim::localToModel(model->skeleton, pose, world);
+            anim::computeSkinningMatrices(model->skeleton, world, skin);
+            MeshData mesh;
+            mesh.indices = model->skin.mesh.indices;
+            mesh.positions.resize(model->skin.mesh.positions.size());
+            mesh.normals.resize(mesh.positions.size());
+            anim::skinVertices(model->skin, skin, mesh.positions, mesh.normals);
+            const scene::MeshId id = renderer().addMesh("Character", mesh);
+            m_drawer.addPreset({"Character", "PRESET", {}, id, static_cast<u32>(mesh.triangleCount()), model, "character"});
+        }
+        {
+            const MeshData mesh = makeBoxMesh(kFloorHalf, {0.0f, -kFloorHalf.y - 0.002f, 0.0f});
+            const scene::MeshId id = renderer().addMesh("Floor", mesh);
+            m_drawer.addPreset({"Floor", "PRESET", {}, id, static_cast<u32>(mesh.triangleCount()), nullptr, "floor"});
+        }
+        {
+            const MeshData mesh = makeBoxMesh(kStoneHalf, {0.0f, kStoneHalf.y, 0.0f});
+            const scene::MeshId id = renderer().addMesh("Stone", mesh);
+            m_drawer.addPreset({"Stone", "PRESET", {}, id, static_cast<u32>(mesh.triangleCount()), nullptr, "stone"});
+        }
+    }
+
+    void spawnPreset(const editor::MeshAsset& asset, std::optional<glm::vec3> groundPoint)
+    {
+        auto& registry = m_scene.registry();
+        // On the floor under the cursor, or on the floor in front of the camera.
+        glm::vec3 position = groundPoint.value_or(glm::vec3(0.0f));
+        if (!groundPoint) {
+            if (const entt::entity camera = m_scene.activeCamera(); camera != entt::null) {
+                const auto& cam = registry.get<scene::TransformComponent>(camera);
+                glm::vec3 ahead = cam.rotation * glm::vec3(0.0f, 0.0f, -3.0f);
+                position = cam.position + ahead;
+                position.y = 0.0f;
+            }
+        }
+        entt::entity entity = entt::null;
+        if (asset.preset == "character") {
+            entity = m_scene.createMesh("Character", asset.id, glm::vec4(0.78f, 0.64f, 0.52f, 1.0f));
+            renderer::enableAnimation(m_scene, renderer(), entity, asset.model);
+            registry.emplace<scene::CharacterComponent>(entity);
+        } else if (asset.preset == "floor") {
+            entity = m_scene.createMesh("Floor", asset.id, glm::vec4(0.30f, 0.32f, 0.36f, 1.0f));
+            registry.emplace<scene::ColliderComponent>(entity, kFloorHalf, glm::vec3(0.0f, -kFloorHalf.y, 0.0f));
+            if (!groundPoint) {
+                position = glm::vec3(0.0f);
+            }
+        } else if (asset.preset == "stone") {
+            entity = m_scene.createMesh("Stone", asset.id, glm::vec4(0.56f, 0.53f, 0.49f, 1.0f));
+            registry.emplace<scene::ColliderComponent>(entity, kStoneHalf, glm::vec3(0.0f, kStoneHalf.y, 0.0f));
+        }
+        if (entity == entt::null) {
+            return;
+        }
+        position.y = std::max(position.y, 0.0f);
+        registry.get<scene::TransformComponent>(entity).position = position;
+        m_selected = entity;
+    }
+
+    void togglePlay()
+    {
+        if (m_play.active()) {
+            m_play.stop(m_scene);
+        } else {
+            m_play.start(m_scene, m_camera);
+        }
     }
 
     // Empty actor (name + transform) in front of the camera, ready for components.
@@ -570,6 +700,24 @@ private:
         if (ImGui::GetIO().WantTextInput) {
             return;
         }
+        if (ImGui::IsKeyPressed(ImGuiKey_F5, false)) {
+            togglePlay();
+            return;
+        }
+        if (m_play.active()) {
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+                togglePlay();
+                return;
+            }
+            m_playInput.move = glm::vec2((ImGui::IsKeyDown(ImGuiKey_D) ? 1.0f : 0.0f) - (ImGui::IsKeyDown(ImGuiKey_A) ? 1.0f : 0.0f),
+                                         (ImGui::IsKeyDown(ImGuiKey_W) ? 1.0f : 0.0f) - (ImGui::IsKeyDown(ImGuiKey_S) ? 1.0f : 0.0f));
+            if (glm::length(m_playInput.move) > 1.0f) {
+                m_playInput.move = glm::normalize(m_playInput.move);
+            }
+            m_playInput.run = ImGui::GetIO().KeyShift;
+            m_playInput.toggleRagdoll = ImGui::IsKeyPressed(ImGuiKey_R, false);
+            return;
+        }
         if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
             deleteSelected();
         }
@@ -618,6 +766,7 @@ private:
         for (const entt::entity entity : entities) {
             const auto& name = m_scene.registry().get<scene::NameComponent>(entity).name;
             const char* icon = m_scene.registry().all_of<scene::CameraComponent>(entity)     ? "[cam] "
+                               : m_scene.registry().all_of<scene::CharacterComponent>(entity) ? "[char] "
                                : m_scene.registry().all_of<scene::AnimatorComponent>(entity) ? "[anim] "
                                                                                              : "";
             ImGui::PushID(static_cast<int>(entt::to_integral(entity)));
@@ -704,6 +853,12 @@ private:
             }
             if (registry.all_of<scene::AnimatorComponent>(m_selected)) {
                 drawAnimatorComponent();
+            }
+            if (registry.all_of<scene::CharacterComponent>(m_selected)) {
+                drawCharacterComponent();
+            }
+            if (registry.all_of<scene::ColliderComponent>(m_selected)) {
+                drawColliderComponent();
             }
             drawAddComponent();
         }
@@ -804,12 +959,20 @@ private:
             property("Clip");
             if (ImGui::BeginCombo("##clip", hasClip ? clips[static_cast<usize>(clip)].name().c_str() : "<none>")) {
                 for (usize i = 0; i < clips.size(); ++i) {
+                    ImGui::PushID(static_cast<int>(i));
                     if (ImGui::Selectable(clips[i].name().c_str(), static_cast<i32>(i) == clip)) {
                         player.play(static_cast<i32>(i), 0.25f);
                         animator.bindPose = false;
                     }
+                    ImGui::SameLine();
+                    clipKindBadge(clips[i]);
+                    ImGui::PopID();
                 }
                 ImGui::EndCombo();
+            }
+            if (hasClip) {
+                property("Kind");
+                clipKindBadge(clips[static_cast<usize>(clip)]);
             }
             property("Loop");
             ImGui::Checkbox("##loop", &player.loop);
@@ -841,6 +1004,44 @@ private:
         }
     }
 
+    void drawCharacterComponent()
+    {
+        bool keep = true;
+        if (ImGui::CollapsingHeader("Character (physics)", &keep, ImGuiTreeNodeFlags_DefaultOpen) && beginProperties("##character")) {
+            auto& c = m_scene.registry().get<scene::CharacterComponent>(m_selected);
+            property("Walk speed");
+            ImGui::SliderFloat("##walk", &c.walkSpeed, 0.5f, 3.0f, "%.1f m/s");
+            property("Run speed");
+            ImGui::SliderFloat("##run", &c.runSpeed, 1.0f, 7.0f, "%.1f m/s");
+            property("Strength");
+            ImGui::SliderFloat("##strength", &c.strength, 0.2f, 3.0f, "x%.2f");
+            tooltip("Scales every muscle's strength (how hard the sword arm can push / resist)");
+            ImGui::EndTable();
+            ImGui::TextDisabled("Play (F5): WASD move, Shift run, LMB attack, R ragdoll.");
+            ImGui::TextDisabled("Walk / Idle are regular animations; Strike is played by the muscles.");
+        }
+        if (!keep) {
+            m_scene.registry().remove<scene::CharacterComponent>(m_selected);
+        }
+    }
+
+    void drawColliderComponent()
+    {
+        bool keep = true;
+        if (ImGui::CollapsingHeader("Box Collider", &keep, ImGuiTreeNodeFlags_DefaultOpen) && beginProperties("##collider")) {
+            auto& c = m_scene.registry().get<scene::ColliderComponent>(m_selected);
+            property("Half extents");
+            ImGui::DragFloat3("##half", glm::value_ptr(c.halfExtents), 0.01f, 0.01f, 100.0f);
+            property("Offset");
+            ImGui::DragFloat3("##offset", glm::value_ptr(c.offset), 0.01f);
+            ImGui::EndTable();
+            ImGui::TextDisabled("Static: characters stand on it and swords hit it in Play.");
+        }
+        if (!keep) {
+            m_scene.registry().remove<scene::ColliderComponent>(m_selected);
+        }
+    }
+
     void drawAddComponent()
     {
         ImGui::Spacing();
@@ -850,6 +1051,9 @@ private:
         if (ImGui::BeginPopup("##addComponent")) {
             auto& registry = m_scene.registry();
             const bool hasMesh = registry.all_of<scene::MeshRendererComponent>(m_selected);
+            if (ImGui::MenuItem("Box Collider", nullptr, false, !registry.all_of<scene::ColliderComponent>(m_selected))) {
+                registry.emplace<scene::ColliderComponent>(m_selected);
+            }
             if (ImGui::MenuItem("Mesh Renderer", nullptr, false, !hasMesh)) {
                 registry.emplace<scene::MeshRendererComponent>(
                     m_selected, scene::kTriangleMesh, glm::vec4(kPalette[m_objectCounter++ % kPalette.size()], 1.0f));
@@ -864,6 +1068,18 @@ private:
                 ImGui::SetTooltip("Needs a Mesh Renderer showing an animated (ANIM) asset");
             }
             ImGui::EndPopup();
+        }
+    }
+
+    // [KIN] regular animation / [PHYS] played by muscles of a physics body.
+    static void clipKindBadge(const anim::AnimationClip& clip)
+    {
+        if (clip.kind() == anim::ClipKind::Physics) {
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.25f, 1.0f), "[PHYS]");
+            tooltip("Physics animation: in Play the muscles follow this clip; hits and rebounds are simulated");
+        } else {
+            ImGui::TextColored(ImVec4(0.45f, 0.7f, 1.0f, 1.0f), "[KIN]");
+            tooltip("Regular (kinematic) animation: the pose is shown as it is in the clip");
         }
     }
 
@@ -900,6 +1116,12 @@ private:
     editor::AssetDrawer m_drawer;
     editor::AnimationEditor m_animationEditor;
     editor::SwordStrikeTest m_swordTest;
+    editor::PlayMode m_play;
+    editor::PlayInput m_playInput;
+    glm::vec2 m_playOrbit{0.0f};
+    f32 m_playWheel = 0.0f;
+    static constexpr glm::vec3 kFloorHalf{10.0f, 0.1f, 10.0f};
+    static constexpr glm::vec3 kStoneHalf{0.35f, 0.45f, 0.35f};
     bool m_showPhysicsWindow = false;
     std::vector<std::string> m_droppedFiles;
 

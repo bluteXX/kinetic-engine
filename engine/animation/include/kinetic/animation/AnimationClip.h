@@ -25,6 +25,12 @@ struct JointTracks {
     Track<glm::vec3> scale;
 };
 
+// How a clip is played.
+//   Kinematic  the pose is shown as sampled (regular animation)
+//   Physics    the pose is a target for muscles (motors) of a physics body; what you see is the
+//              simulation trying to follow it (hits, rebounds, muscles giving way)
+enum class ClipKind : u8 { Kinematic, Physics };
+
 class AnimationClip {
 public:
     AnimationClip() = default;
@@ -34,6 +40,8 @@ public:
     [[nodiscard]] f32 duration() const { return m_duration; }
     [[nodiscard]] usize jointCount() const { return m_tracks.size(); }
     [[nodiscard]] const std::vector<JointTracks>& tracks() const { return m_tracks; }
+    [[nodiscard]] ClipKind kind() const { return m_kind; }
+    void setKind(ClipKind kind) { m_kind = kind; }
 
     // Writes animated channels at `time` into `out` (which should start as the rest pose).
     void sample(f32 time, bool loop, Pose& out) const;
@@ -42,6 +50,7 @@ private:
     std::string m_name;
     f32 m_duration = 0.0f;
     std::vector<JointTracks> m_tracks; // indexed by skeleton joint
+    ClipKind m_kind = ClipKind::Kinematic;
 };
 
 } // namespace kinetic::anim
