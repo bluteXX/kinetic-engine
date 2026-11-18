@@ -480,6 +480,20 @@ void PhysicsWorld::setMuscle(JointId id, const Muscle& muscle)
     }
 }
 
+void PhysicsWorld::setRestitution(BodyId body, f32 restitution)
+{
+    Impl::Body& b = m_impl->bodies[body.index];
+    b.desc.restitution = restitution;
+    m_impl->system->GetBodyInterface().SetRestitution(b.id, restitution);
+}
+
+void PhysicsWorld::setFriction(BodyId body, f32 friction)
+{
+    Impl::Body& b = m_impl->bodies[body.index];
+    b.desc.friction = friction;
+    m_impl->system->GetBodyInterface().SetFriction(b.id, friction);
+}
+
 void PhysicsWorld::setTargetAngle(JointId id, f32 angle)
 {
     Impl::Joint& joint = m_impl->joints[id.index];

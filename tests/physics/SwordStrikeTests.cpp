@@ -65,3 +65,43 @@ TEST_CASE("Sword strike: the contact impulse does not depend on the step rate")
     MESSAGE("impulse at 240 Hz: ", coarse, " N s, at 960 Hz: ", fine, " N s");
     CHECK(coarse == doctest::Approx(fine).epsilon(0.1));
 }
+
+TEST_CASE("Sword strike: the blade rebounds right after the impact and does not keep pressing")
+{
+    editor::SwordStrikeTest test;
+    REQUIRE(test.createHeadless());
+    constexpr f32 kStep = 1.0f / 960.0f;
+
+    const auto tipVelocityY = [&] {
+        const physics::BodyState& s = test.world().body(test.sword());
+        const glm::vec3 tip = s.position + s.rotation * glm::vec3(0.0f, -1.0f, 0.0f);
+        return (s.linearVelocity + glm::cross(s.angularVelocity, tip - s.centerOfMass)).y;
+    };
+
+    f32 time = 0.0f;
+    f32 impact = -1.0f;
+    f32 velocityBefore = 0.0f;
+    f32 velocityAfter = 0.0f;
+    f32 lastContact = 0.0f;
+    while (time < 1.6f) {
+        const f32 before = tipVelocityY();
+        test.advance(kStep);
+        time += kStep;
+        if (test.world().body(test.sword()).inContact) {
+            if (impact < 0.0f) {
+                impact = time;
+                velocityBefore = before;
+            }
+            lastContact = time;
+        }
+        if (impact >= 0.0f && velocityAfter == 0.0f && time >= impact + 0.02f) {
+            velocityAfter = tipVelocityY();
+        }
+    }
+    REQUIRE(impact > 0.0f);
+    MESSAGE("impact at ", impact, " s: tip vy ", velocityBefore, " -> ", velocityAfter, " m/s 20 ms later; last contact ",
+            (lastContact - impact) * 1000.0f, " ms after the impact");
+    CHECK(velocityBefore < -2.0f); // the blade came down fast
+    CHECK(velocityAfter > 0.0f);   // and bounced up straight away
+    CHECK(lastContact - impact < 0.1f); // no pressing / grinding on the stone afterwards
+}

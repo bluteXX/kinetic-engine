@@ -373,6 +373,9 @@ void SwordStrikeTest::buildWorld()
     for (usize i = 0; i < 3; ++i) {
         m_world.setTargetAngle(m_joints[i].id, start[i]);
     }
+    applyMaterials();
+    m_phase = Phase::Swing;
+    m_phaseStart = 0.0f;
 }
 
 void SwordStrikeTest::create(scene::Scene& scene, renderer::Renderer& renderer)
@@ -499,14 +502,55 @@ f32 SwordStrikeTest::jToFEstimate(usize hinge) const
     return -glm::dot(j.axis, glm::cross(sword.contactPoint - j.anchor, sword.contactForce));
 }
 
-void SwordStrikeTest::simulateStep(f32 dt)
+void SwordStrikeTest::applyMaterials()
+{
+    m_world.setRestitution(m_sword, m_reaction.restitution);
+    m_world.setRestitution(m_stone, m_reaction.restitution);
+}
+
+void SwordStrikeTest::updateTargets(f32 dt)
 {
     m_player.loop = m_loop;
     m_player.update(dt, m_clips);
-    m_targets = clipAngles(m_player.time());
+    const std::array<f32, 3> animation = clipAngles(m_player.time());
+    const f32 sincePhase = m_simTime - m_phaseStart;
+
+    switch (m_phase) {
+    case Phase::Swing:
+    case Phase::Reflex:
+        // Before the reflex kicks in the muscles keep following the swing they were executing.
+        m_targets = animation;
+        if (m_phase == Phase::Reflex && sincePhase >= m_reaction.reflexMs * 0.001f) {
+            m_phase = Phase::Recover;
+            m_phaseStart = m_simTime;
+            m_player.setTime(m_reaction.recoveryClipTime, m_clips); // skip the follow-through
+            m_player.playing = true;
+        }
+        break;
+    case Phase::Recover: {
+        // Target = current angle + w * (animation - current): with w < 1 the muscles only partly
+        // pull towards the animation, so the arm keeps the rebound's momentum and is caught softly.
+        const f32 x = std::clamp(sincePhase / std::max(m_reaction.recoverTime, 1e-3f), 0.0f, 1.0f);
+        const f32 smooth = x * x * (3.0f - 2.0f * x);
+        const f32 w = m_reaction.hold + (1.0f - m_reaction.hold) * smooth;
+        for (usize i = 0; i < 3; ++i) {
+            const f32 current = m_world.joint(m_joints[i].id).angle;
+            m_targets[i] = current + w * (animation[i] - current);
+        }
+        if (x >= 1.0f) {
+            m_phase = Phase::Swing;
+        }
+        break;
+    }
+    }
     for (usize i = 0; i < 3; ++i) {
         m_world.setTargetAngle(m_joints[i].id, m_targets[i]);
     }
+}
+
+void SwordStrikeTest::simulateStep(f32 dt)
+{
+    updateTargets(dt);
     m_world.step(dt);
     m_simTime += dt;
 
@@ -535,6 +579,10 @@ void SwordStrikeTest::simulateStep(f32 dt)
     static constexpr f32 kContactThreshold = 1.0f; // N
     static constexpr f32 kHitTail = 0.15f;         // s
     const bool touching = contact > kContactThreshold;
+    if (touching && m_phase == Phase::Swing && m_reaction.enabled) {
+        m_phase = Phase::Reflex; // the reaction starts at the impact
+        m_phaseStart = m_simTime;
+    }
     if (touching && !m_inHit) {
         if (m_hits.size() >= 64) {
             m_hits.erase(m_hits.begin());
@@ -804,7 +852,9 @@ void SwordStrikeTest::drawWindow(bool* open)
     }
     tooltip("Physics steps per second. A rigid impact resolves in about one step: higher rates mean less\n"
             "penetration and a finer time resolution (impulses stay the same, per-step peaks grow).");
-    ImGui::TextDisabled("t = %.3f s  |  clip %.2f s", static_cast<double>(m_simTime), static_cast<double>(m_player.time()));
+    const char* phaseName = m_phase == Phase::Swing ? "swing" : m_phase == Phase::Reflex ? "REFLEX" : "RECOVER";
+    ImGui::TextDisabled("t = %.3f s  |  clip %.2f s  |  phase: %s", static_cast<double>(m_simTime),
+                        static_cast<double>(m_player.time()), phaseName);
 
     // --- Live joint table ---
     ImGui::SeparatorText("Live");
@@ -1003,6 +1053,33 @@ void SwordStrikeTest::drawWindow(bool* open)
         const f32 maxContact = std::max(100.0f, *std::max_element(m_contactHistory.begin(), m_contactHistory.end()));
         ImGui::PlotLines("##contact", m_contactHistory.data(), static_cast<int>(kHistory), offset, overlay, 0.0f,
                          maxContact * 1.1f, ImVec2(-FLT_MIN, 46.0f));
+    }
+
+    // --- Reaction ---
+    if (ImGui::CollapsingHeader("Reaction to the hit", ImGuiTreeNodeFlags_DefaultOpen)) {
+        Reaction& r = m_reaction;
+        ImGui::Checkbox("Enabled", &r.enabled);
+        tooltip("Off: the muscles keep following the animation through the stone (no reaction)");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(150.0f);
+        if (ImGui::SliderFloat("Restitution", &r.restitution, 0.0f, 0.9f, "%.2f")) {
+            applyMaterials();
+        }
+        tooltip("How much the blade bounces off the stone (steel on granite ~0.3-0.5, on wood ~0.1)");
+        ImGui::SetNextItemWidth(150.0f);
+        ImGui::SliderFloat("Reflex", &r.reflexMs, 0.0f, 200.0f, "%.0f ms");
+        tooltip("Reaction time: until then the muscles keep pushing the swing (humans ~40-80 ms)");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(150.0f);
+        ImGui::SliderFloat("Recover", &r.recoverTime, 0.05f, 1.5f, "%.2f s");
+        tooltip("Time until the arm follows the animation again");
+        ImGui::SetNextItemWidth(150.0f);
+        ImGui::SliderFloat("Hold", &r.hold, 0.0f, 1.0f, "%.2f");
+        tooltip("Right after the reflex: 0 = arm goes limp with the rebound, 1 = muscles pull straight back to the animation");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(150.0f);
+        ImGui::SliderFloat("Continue at", &r.recoveryClipTime, 0.95f, 1.5f, "clip %.2f s");
+        tooltip("Where the animation continues after the hit (skips the follow-through)");
     }
 
     // --- Muscles ---

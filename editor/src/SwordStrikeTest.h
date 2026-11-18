@@ -39,6 +39,24 @@ public:
     // Runs fixed steps for `seconds` of simulated time (ignores pause / freeze-on-hit).
     void advance(f32 seconds);
     void setStepRate(f32 hz) { m_stepHz = hz; }
+
+    // What the arm does after the blade hits something.
+    //   Swing    follows the animation
+    //   Reflex   reaction time: the muscles keep doing what they were doing (~50 ms in humans)
+    //   Recover  the animation jumps past the follow-through (which would go through the target);
+    //            the muscles first only partly resist the rebound (`give`), then take the arm back
+    //            to the animation over `recoverTime`
+    enum class Phase : u8 { Swing, Reflex, Recover };
+    struct Reaction {
+        bool enabled = true;
+        f32 reflexMs = 50.0f;
+        f32 recoverTime = 0.4f;       // s, until the arm follows the animation again
+        f32 hold = 0.3f;              // 0 = muscles go limp after the reflex, 1 = snap back to the animation
+        f32 recoveryClipTime = 1.15f; // where the animation continues (mid-way back to guard)
+        f32 restitution = 0.35f;      // blade on stone (steel on granite ~0.3-0.5)
+    };
+    [[nodiscard]] Phase phase() const { return m_phase; }
+    [[nodiscard]] Reaction& reaction() { return m_reaction; }
     void destroy(scene::Scene& scene, renderer::Renderer& renderer);
 
     // Advances the simulation by frameDt * timeScale in fixed steps and moves the entities.
@@ -107,6 +125,8 @@ private:
     void buildWorld();
     void placeStone();
     void simulateStep(f32 dt);
+    void updateTargets(f32 dt);
+    void applyMaterials();
     void resetAnalysis();
     // Forward kinematics of the arm for given joint angles (shoulder, elbow, wrist):
     // joint positions and the blade tip.
@@ -147,6 +167,11 @@ private:
     bool m_stepOnce = false;
     bool m_freezeOnHit = true;
     bool m_loop = true;
+
+    // Reaction layer.
+    Reaction m_reaction;
+    Phase m_phase = Phase::Swing;
+    f32 m_phaseStart = 0.0f;
 
     // Analysis.
     bool m_inHit = false;

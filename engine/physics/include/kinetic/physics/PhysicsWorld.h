@@ -145,6 +145,9 @@ public:
     JointId addFixed(const FixedDesc& desc);
 
     void setMuscle(JointId joint, const Muscle& muscle);
+    // Contact material. Jolt combines two bodies' restitution with max() and friction with sqrt(a b).
+    void setRestitution(BodyId body, f32 restitution);
+    void setFriction(BodyId body, f32 friction);
     void setTargetAngle(JointId joint, f32 angle);
     void setGravity(const glm::vec3& gravity);
     [[nodiscard]] glm::vec3 gravity() const;
