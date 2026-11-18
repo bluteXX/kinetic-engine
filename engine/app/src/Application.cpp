@@ -122,12 +122,18 @@ void Application::renderFrame(f32 alpha)
 {
     gfx::Frame frame = m_device.beginFrame();
     if (frame.cmd && frame.swapchain) {
-        m_imgui.prepare(frame.cmd); // copy pass, must precede the render pass
-        SDL_GPURenderPass* pass = m_renderer.beginMainPass(frame, clearColor);
-        RenderContext ctx{frame, pass, m_renderer, alpha};
-        onRender(ctx);
-        m_imgui.render(frame.cmd, pass);
-        m_renderer.endMainPass(pass);
+        m_imgui.prepare(frame.cmd); // copy pass, must precede the render passes
+
+        SDL_GPURenderPass* scenePass = m_renderer.beginScenePass(frame, clearColor);
+        if (scenePass) {
+            RenderContext ctx{frame, scenePass, m_renderer, alpha};
+            onRender(ctx);
+            m_renderer.endPass(scenePass);
+        }
+
+        SDL_GPURenderPass* overlayPass = m_renderer.beginOverlayPass(frame);
+        m_imgui.render(frame.cmd, overlayPass);
+        m_renderer.endPass(overlayPass);
     }
     m_device.endFrame(frame);
 }

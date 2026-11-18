@@ -5,16 +5,27 @@
 
 set(KINETIC_SHADER_DIR ${CMAKE_SOURCE_DIR}/shaders/compiled)
 
-# kinetic_copy_shaders(<target>) — copies compiled shaders next to the executable after each build.
+# All executables share CMAKE_RUNTIME_OUTPUT_DIRECTORY, so shaders/ and assets/ are copied there
+# once, by a single target. Per-executable POST_BUILD copies raced each other in parallel builds
+# (two `copy_directory` into the same folder -> "No such file or directory").
+get_property(_kinetic_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(_kinetic_multi_config)
+    set(KINETIC_RUNTIME_DIR ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>)
+else()
+    set(KINETIC_RUNTIME_DIR ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+endif()
+
+add_custom_target(kinetic_runtime_files
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${KINETIC_SHADER_DIR} ${KINETIC_RUNTIME_DIR}/shaders
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets ${KINETIC_RUNTIME_DIR}/assets
+    COMMENT "Copying shaders and assets to ${KINETIC_RUNTIME_DIR}")
+
+# kinetic_copy_shaders(<target>) / kinetic_copy_assets(<target>) — make sure shaders / assets
+# are next to the executable when <target> is built.
 function(kinetic_copy_shaders target)
-    add_custom_command(TARGET ${target} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory ${KINETIC_SHADER_DIR} $<TARGET_FILE_DIR:${target}>/shaders
-        COMMENT "Copying shaders for ${target}")
+    add_dependencies(${target} kinetic_runtime_files)
 endfunction()
 
-# kinetic_copy_assets(<target>) — copies the assets/ folder next to the executable.
 function(kinetic_copy_assets target)
-    add_custom_command(TARGET ${target} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:${target}>/assets
-        COMMENT "Copying assets for ${target}")
+    add_dependencies(${target} kinetic_runtime_files)
 endfunction()
