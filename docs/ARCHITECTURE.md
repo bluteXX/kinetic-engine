@@ -41,7 +41,11 @@ events ─► fixed update ×N ─► update ─► ImGui ─► render
   to interpolate between the last two ticks. Frame time is clamped to 0.25 s to avoid the
   "spiral of death" after a breakpoint.
 - **Frame lifecycle** (`gfx::Device`): acquire command buffer + swapchain → copy passes
-  (ImGui upload, later: skinning matrices) → main render pass → submit.
+  (ImGui upload, later: skinning matrices) → scene pass (colour + depth, 3D content)
+  → overlay pass (colour only, ImGui) → submit. UI gets its own pass because ImGui's pipeline has
+  no depth format and Metal requires pipeline and pass attachments to match.
+- **Camera** is an entity with `CameraComponent` + `TransformComponent`; it looks down local −Z.
+  `Renderer::drawScene` renders every `MeshRendererComponent` from the scene's first camera.
 
 ## Animation data
 

@@ -21,7 +21,7 @@ struct AppDesc {
 
 struct RenderContext {
     gfx::Frame& frame;
-    SDL_GPURenderPass* pass;
+    SDL_GPURenderPass* pass; // scene pass: colour + depth; UI is drawn afterwards in its own pass
     renderer::Renderer& renderer;
     f32 interpolationAlpha; // 0..1 between the previous and current fixed tick
 };
