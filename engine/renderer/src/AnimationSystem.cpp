@@ -1,6 +1,7 @@
 #include "kinetic/renderer/AnimationSystem.h"
 
 #include <kinetic/animation/PoseOps.h>
+#include <kinetic/scene/AnimatorSystem.h>
 
 namespace kinetic::renderer {
 
@@ -80,31 +81,21 @@ void destroyEntity(scene::Scene& scene, Renderer& renderer, entt::entity entity)
     scene.destroyEntity(entity);
 }
 
-void updateAnimations(scene::Scene& scene, Renderer& renderer, f32 dt)
+void updateAnimations(scene::Scene& scene, Renderer& renderer, f32 dt, bool evaluate)
 {
+    if (evaluate) {
+        scene::updateAnimatorPoses(scene, dt);
+    } else {
+        scene::finishAnimatorPoses(scene); // poses were evaluated earlier this frame (Play)
+    }
+    scene::updateAttachments(scene);
     auto view = scene.registry().view<scene::AnimatorComponent>();
     for (const entt::entity entity : view) {
         auto& a = view.get<scene::AnimatorComponent>(entity);
-        if (!a.model) {
+        if (!a.model || a.skinMatrices.size() != a.model->skeleton.jointCount()) {
             continue;
         }
         const anim::SkinnedModel& model = *a.model;
-        const usize jointCount = model.skeleton.jointCount();
-
-        if (a.bindPose) {
-            a.localPose = model.skeleton.restPose();
-        } else if (a.externalPose && a.localPose.jointCount() == jointCount) {
-            // pose provided externally (physics)
-        } else {
-            a.player.update(dt, model.clips);
-            a.player.evaluate(model.skeleton, model.clips, a.localPose, a.scratchPose);
-        }
-
-        a.jointModel.resize(jointCount);
-        a.skinMatrices.resize(jointCount);
-        anim::localToModel(model.skeleton, a.localPose, a.jointModel);
-        anim::computeSkinningMatrices(model.skeleton, a.jointModel, a.skinMatrices);
-
         const auto* meshRenderer = scene.registry().try_get<scene::MeshRendererComponent>(entity);
         if (!meshRenderer) {
             continue;
@@ -112,8 +103,9 @@ void updateAnimations(scene::Scene& scene, Renderer& renderer, f32 dt)
         const usize vertexCount = model.skin.mesh.positions.size();
         a.skinnedPositions.resize(vertexCount);
         a.skinnedNormals.resize(vertexCount);
-        anim::skinVertices(model.skin, a.skinMatrices, a.skinnedPositions, a.skinnedNormals);
-        renderer.updateMeshVertices(meshRenderer->mesh, a.skinnedPositions, a.skinnedNormals);
+        a.skinnedTangents.resize(model.skin.mesh.hasTangents() ? vertexCount : 0);
+        anim::skinVertices(model.skin, a.skinMatrices, a.skinnedPositions, a.skinnedNormals, a.skinnedTangents);
+        renderer.updateMeshVertices(meshRenderer->mesh, a.skinnedPositions, a.skinnedNormals, a.skinnedTangents);
     }
 }
 

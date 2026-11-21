@@ -3,12 +3,15 @@
 #
 #   core
 #   animation -> core                  (pure CPU, no SDL / GPU)
-#   assets    -> animation             (glTF import, FBX/OBJ meshes via ufbx)
+#   assets    -> animation             (glTF import, FBX/OBJ meshes via ufbx, PNG via SDL)
 #   scene     -> animation             (EnTT; animator component)
 #   platform  -> core                  (SDL3 window / input)
 #   gfx       -> platform              (SDL_GPU device, shaders, frames)
 #   physics   -> core                  (Jolt, hidden behind PhysicsWorld)
-#   renderer  -> gfx, scene
+#   gameplay  -> scene                 (character controller)
+#   physanim  -> scene, physics        (physics animation: bones on muscles, hits, knockdown)
+#   vfx       -> core                  (particle effects from .vfx files)
+#   renderer  -> gfx, scene, vfx
 #   ui        -> gfx                   (Dear ImGui)
 #   app       -> renderer, ui          (main loop)
 #
@@ -32,12 +35,15 @@ endfunction()
 
 kinetic_add_module(core      PUBLIC_DEPS glm::glm spdlog::spdlog)
 kinetic_add_module(animation PUBLIC_DEPS kinetic::core)
-kinetic_add_module(assets    PUBLIC_DEPS kinetic::animation PRIVATE_DEPS cgltf ufbx)
+kinetic_add_module(assets    PUBLIC_DEPS kinetic::animation PRIVATE_DEPS cgltf ufbx SDL3::SDL3)
 kinetic_add_module(scene     PUBLIC_DEPS kinetic::animation EnTT::EnTT)
 kinetic_add_module(platform  PUBLIC_DEPS kinetic::core SDL3::SDL3)
 kinetic_add_module(gfx       PUBLIC_DEPS kinetic::platform)
 kinetic_add_module(physics   PUBLIC_DEPS kinetic::core PRIVATE_DEPS Jolt)
-kinetic_add_module(renderer  PUBLIC_DEPS kinetic::gfx kinetic::scene)
+kinetic_add_module(gameplay  PUBLIC_DEPS kinetic::scene)
+kinetic_add_module(physanim  PUBLIC_DEPS kinetic::scene kinetic::physics)
+kinetic_add_module(vfx       PUBLIC_DEPS kinetic::core)
+kinetic_add_module(renderer  PUBLIC_DEPS kinetic::gfx kinetic::scene kinetic::vfx)
 kinetic_add_module(ui        PUBLIC_DEPS kinetic::gfx imgui)
 kinetic_add_module(app       PUBLIC_DEPS kinetic::renderer kinetic::ui)
 
@@ -50,7 +56,8 @@ target_compile_definitions(kinetic_core PUBLIC
 add_library(kinetic_engine INTERFACE)
 add_library(kinetic::engine ALIAS kinetic_engine)
 target_link_libraries(kinetic_engine INTERFACE
-    kinetic::app kinetic::assets kinetic::animation kinetic::scene kinetic::physics)
+    kinetic::app kinetic::assets kinetic::animation kinetic::scene kinetic::physics kinetic::gameplay
+    kinetic::physanim kinetic::vfx)
 
 if(MSVC)
     # /Zc:preprocessor -> standard preprocessor (__VA_OPT__), /utf-8 -> required by fmt/spdlog

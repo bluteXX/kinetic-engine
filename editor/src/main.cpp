@@ -22,15 +22,20 @@
 #include "AnimationEditor.h"
 #include "AssetDrawer.h"
 #include "CharacterRig.h"
+#include "CharacterSetup.h"
+#include "ComponentGizmos.h"
 #include "PlayMode.h"
 #include "SwordStrikeTest.h"
 
+#include <kinetic/animation/Combat.h>
+#include <kinetic/physanim/PhysicalBody.h>
 #include <kinetic/animation/PoseOps.h>
 #include <kinetic/app/Application.h>
 #include <kinetic/core/Primitives.h>
 #include <kinetic/core/Log.h>
 #include <kinetic/renderer/AnimationSystem.h>
 #include <kinetic/renderer/Picking.h>
+#include <kinetic/renderer/VfxRender.h>
 #include <kinetic/scene/AnimatorComponent.h>
 #include <kinetic/scene/Scene.h>
 
@@ -39,10 +44,12 @@
 #include <imgui.h>
 #include <imgui_internal.h> // DockBuilder API
 
+#include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -120,7 +127,7 @@ ImU32 toImColor(const glm::vec3& c, f32 alpha = 1.0f)
 
 } // namespace
 
-class EditorApp final : public Application {
+class EditorApp final : public Application, public editor::ActorEditorHost {
 public:
     using Application::Application;
 
@@ -128,7 +135,9 @@ protected:
     bool onInit() override
     {
         m_camera = m_scene.createCamera("Camera", {0.0f, 1.6f, 4.0f}, {0.0f, 0.8f, 0.0f});
-        m_drawer.init(renderer(), {assetsRoot() / "meshes", assetsRoot() / "models"});
+        m_drawer.init(renderer(), assetsRoot());
+        m_vfxLibrary.loadDirectory(assetsRoot() / "vfx");
+        m_play.setVfxLibrary(&m_vfxLibrary);
         addPresets();
         // Start with a floor to walk on.
         for (usize i = 0; i < m_drawer.assets().size(); ++i) {
@@ -180,6 +189,31 @@ protected:
                 if (ImGui::MenuItem("Frame Selected", "F", false, m_scene.registry().valid(m_selected))) {
                     frameSelected();
                 }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Give Selected a Sword", nullptr, false, isAnimated(m_selected))) {
+                    giveSword(m_selected);
+                }
+                if (ImGui::MenuItem("Test Scene: Uneven Ground")) {
+                    buildIkTestScene();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Replaces the scene: stairs, ramps, rocks, uneven tiles, the warrior with a sword, the tentacle");
+                }
+                if (ImGui::MenuItem("Test Scene: Warrior vs Materials")) {
+                    buildWarriorMaterialScene();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Replaces the scene: the warrior with a sword and a row of stone, metal, wood, dirt and "
+                                      "flesh pillars. Play (F5): A / D along the row, W to face a pillar, LMB attack - the sword "
+                                      "arm runs on muscles and the blade bounces, stops or cuts in; the HUD lists each hit.");
+                }
+                if (ImGui::MenuItem("Test Scene: Materials (physics strikes)")) {
+                    buildMaterialTestScene();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Replaces the scene: six physics swordsmen in front of stone, metal, wood, dirt, flesh "
+                                      "and a slanted stone slab. Play (F5), LMB: all strike at once; the HUD lists each hit.");
+                }
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Physics")) {
@@ -195,12 +229,14 @@ protected:
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("View")) {
-                if (ImGui::MenuItem("Animation Editor", nullptr, false, isAnimated(m_selected))) {
+                if (ImGui::MenuItem("Actor Editor", nullptr, false, canOpenActorEditor(m_selected))) {
                     m_animationEditor.open(m_selected);
                 }
                 ImGui::Separator();
                 ImGui::MenuItem("Skeleton of Selection", nullptr, &m_showSkeleton);
                 ImGui::MenuItem("Selection Outline", nullptr, &m_showSelectionBox);
+                ImGui::MenuItem("Component Gizmos", nullptr, &m_showGizmos);
+                ImGui::MenuItem("All Colliders", nullptr, &m_showAllColliders);
                 ImGui::MenuItem("Grid", nullptr, &m_showGrid);
                 ImGui::MenuItem("Play: Physics Vectors", nullptr, &m_play.showDebug);
                 ImGui::MenuItem("Play: Body Centres", nullptr, &m_play.showShapes);
@@ -224,7 +260,7 @@ protected:
         drawInspector();
         drawStats();
         m_drawer.draw();
-        m_animationEditor.draw(m_scene, renderer());
+        m_animationEditor.draw(m_scene, renderer(), *this);
         if (m_showPhysicsWindow) {
             m_swordTest.drawWindow(&m_showPhysicsWindow);
         }
@@ -243,11 +279,24 @@ protected:
         m_playInput = {};
         m_playOrbit = glm::vec2(0.0f);
         m_playWheel = 0.0f;
-        renderer::updateAnimations(m_scene, renderer(), ImGui::GetIO().DeltaTime);
+        // In Play the poses were evaluated (and the physics applied) by PlayMode::update already.
+        renderer::updateAnimations(m_scene, renderer(), ImGui::GetIO().DeltaTime, !m_play.active());
+        renderer::syncVfx(m_scene, renderer(), m_play.vfx(), m_vfxRender);
+        autosaveActors(ImGui::GetIO().DeltaTime);
         std::vector<renderer::DebugVertex> overlay;
         if (m_showSkeleton && isAnimated(m_selected)) {
             renderer::appendSkeletonLines(m_scene.registry().get<scene::AnimatorComponent>(m_selected),
                                           m_scene.registry().get<scene::TransformComponent>(m_selected).matrix(), overlay);
+        }
+        // Components of the selected actor (collider box, controller capsule, foot IK targets).
+        if (m_showGizmos && !m_play.active() && m_scene.registry().valid(m_selected) && m_selected != m_camera) {
+            editor::GizmoOptions gizmos;
+            gizmos.highlight = m_animationEditor.isOpen() && m_animationEditor.actor() == m_selected;
+            editor::appendComponentGizmos(m_scene, m_selected, m_scene.registry().get<scene::TransformComponent>(m_selected).matrix(),
+                                          overlay, gizmos);
+        }
+        if (m_showAllColliders) {
+            editor::appendAllColliders(m_scene, overlay);
         }
         glm::vec3 boxMin;
         glm::vec3 boxMax;
@@ -384,7 +433,7 @@ private:
         }
         if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && !m_lookBlocked) {
             selectUnderMouse(p0, size);
-            if (isAnimated(m_selected)) {
+            if (canOpenActorEditor(m_selected)) {
                 m_animationEditor.open(m_selected);
             }
         }
@@ -537,14 +586,352 @@ private:
             spawnPreset(*asset, groundPoint);
             return;
         }
-        const glm::vec3 tint = kPalette[m_objectCounter % kPalette.size()];
+        // Textured assets show their texture as authored; others get a palette colour.
+        const glm::vec3 tint = asset->textured() ? glm::vec3(1.0f) : kPalette[m_objectCounter % kPalette.size()];
         const std::string name = asset->id == scene::kTriangleMesh ? "Actor " + std::to_string(m_objectCounter) : asset->name;
         const entt::entity entity = m_scene.createMesh(name, asset->id, glm::vec4(tint, 1.0f));
+        applyMaterial(entity, *asset);
         ++m_objectCounter;
         if (asset->animated()) {
             renderer::enableAnimation(m_scene, renderer(), entity, asset->model);
         }
         placeEntity(entity, boundsMin, boundsMax, groundPoint);
+    }
+
+    void applyMaterial(entt::entity entity, const editor::MeshAsset& asset)
+    {
+        auto& mesh = m_scene.registry().get<scene::MeshRendererComponent>(entity);
+        mesh.baseColorTexture = asset.baseColorTexture;
+        mesh.normalTexture = asset.normalTexture;
+    }
+
+    // --- Test scene: uneven ground, a hero with a sword, the tentacle ------------------------------
+
+    // A long sword (metres, grip at the origin, blade along +Y, flat side facing +Z).
+    static MeshData makeSwordMesh()
+    {
+        MeshData sword;
+        const auto add = [&](const glm::vec3& half, const glm::vec3& center) {
+            const MeshData part = makeBoxMesh(half, center);
+            const auto base = static_cast<u32>(sword.positions.size());
+            sword.positions.insert(sword.positions.end(), part.positions.begin(), part.positions.end());
+            sword.normals.insert(sword.normals.end(), part.normals.begin(), part.normals.end());
+            for (const u32 i : part.indices) sword.indices.push_back(base + i);
+        };
+        add({0.016f, 0.10f, 0.016f}, {0.0f, 0.0f, 0.0f});     // grip
+        add({0.025f, 0.022f, 0.025f}, {0.0f, -0.12f, 0.0f});  // pommel
+        add({0.11f, 0.015f, 0.025f}, {0.0f, 0.115f, 0.0f});   // cross guard
+        add({0.024f, 0.42f, 0.005f}, {0.0f, 0.55f, 0.0f});    // blade
+        add({0.012f, 0.03f, 0.004f}, {0.0f, 0.995f, 0.0f});   // tip
+        return sword;
+    }
+
+    // Attaches a sword to the selected animated actor's weapon hand (anim::findWeaponHand).
+    entt::entity giveSword(entt::entity actor)
+    {
+        auto& registry = m_scene.registry();
+        const auto* animator = registry.try_get<scene::AnimatorComponent>(actor);
+        if (!animator || !animator->model) {
+            return entt::null;
+        }
+        const i32 hand = anim::findWeaponHand(animator->model->skeleton);
+        if (hand < 0) {
+            return entt::null;
+        }
+        if (m_swordMesh == renderer::Renderer::kInvalidMesh) {
+            m_swordMesh = renderer().addMesh("Sword", makeSwordMesh());
+        }
+        const entt::entity sword = m_scene.createMesh("Sword", m_swordMesh, glm::vec4(0.78f, 0.80f, 0.84f, 1.0f));
+        auto& attachment = registry.emplace<scene::AttachmentComponent>(sword);
+        attachment.parent = actor;
+        attachment.joint = hand;
+        attachment.offset = anim::weaponSocket(animator->model->skeleton, hand);
+        // Collision box matching makeSwordMesh (guard to tip); in Play the bones holding it can run
+        // on muscles (a clip's physics bones).
+        registry.emplace<scene::WeaponComponent>(sword);
+        editor::loadActorWeapons(m_scene, actor); // a socket saved for this model
+        return sword;
+    }
+
+    entt::entity addBlock(const char* name, const glm::vec3& position, const glm::vec3& half, const glm::quat& rotation,
+                          const glm::vec3& color)
+    {
+        const scene::MeshId mesh = renderer().addMesh(name, makeBoxMesh(half));
+        const entt::entity e = m_scene.createMesh(name, mesh, glm::vec4(color, 1.0f));
+        auto& t = m_scene.registry().get<scene::TransformComponent>(e);
+        t.position = position;
+        t.rotation = rotation;
+        m_scene.registry().emplace<scene::ColliderComponent>(e, half, glm::vec3(0.0f));
+        return e;
+    }
+
+    // Replaces the scene with ground to test foot IK and the controller on (stairs, ramps, a
+    // slope, rocks, uneven tiles), the warrior as a playable hero with a sword, and the tentacle.
+    // The warrior asset as a playable hero with a sword (its arm runs on muscles when attacking
+    // in Play). Returns null when the asset is not in the drawer.
+    entt::entity spawnWarriorHero(const glm::vec3& position)
+    {
+        for (usize i = 0; i < m_drawer.assets().size(); ++i) {
+            const editor::MeshAsset& asset = *m_drawer.asset(i);
+            if (asset.name != "Warrior") continue;
+            const entt::entity hero = m_scene.createMesh("Warrior", asset.id, glm::vec4(1.0f));
+            applyMaterial(hero, asset);
+            if (asset.animated()) {
+                renderer::enableAnimation(m_scene, renderer(), hero, asset.model);
+                m_heroMessage = editor::makePlayableHero(m_scene, hero, 1.8f).message;
+                m_heroMessageFor = hero;
+                giveSword(hero);
+            }
+            m_scene.registry().get<scene::TransformComponent>(hero).position = position;
+            m_selected = hero;
+            return hero;
+        }
+        return entt::null;
+    }
+
+    // The warrior (muscle-driven sword arm during its Mixamo attacks) and, for every attack of its
+    // combo, a row of tall pillars (stone, metal, wood, dirt, flesh) placed automatically where
+    // that attack's blade strikes (physanim::findStrikePoint). Stand on a pad (facing +Z, the way
+    // the hero starts) and press the attack's number key; the HUD lists what the blade did.
+    void buildWarriorMaterialScene()
+    {
+        clearScene();
+        const glm::quat none(1.0f, 0.0f, 0.0f, 0.0f);
+        constexpr f32 kColumn = 3.0f; // between materials
+        constexpr f32 kRow = 6.0f;    // between attacks (rows go back along -Z)
+        const entt::entity hero = spawnWarriorHero({0.0f, 0.0f, 0.0f});
+        if (hero == entt::null) {
+            return;
+        }
+        auto& registry = m_scene.registry();
+        // The Mixamo attacks swing the blade flat in places: turn the hand so it cuts edge first.
+        if (const auto* a = registry.try_get<scene::AnimatorComponent>(hero); a && a->blendTree) {
+            const std::shared_ptr<anim::BlendTree> tree = a->blendTree;
+            for (const i32 state : anim::attackChain(*tree)) {
+                (void)editor::alignWeaponEdge(m_scene, hero, anim::stateClip(*tree, state));
+            }
+        }
+        const auto* animator = registry.try_get<scene::AnimatorComponent>(hero);
+        std::vector<physanim::StrikePoint> strikes;
+        entt::entity sword = entt::null;
+        for (const entt::entity e : registry.view<scene::AttachmentComponent, scene::WeaponComponent>()) {
+            if (registry.get<scene::AttachmentComponent>(e).parent == hero) sword = e;
+        }
+        if (animator && animator->blendTree && animator->model && sword != entt::null) {
+            const auto& a = registry.get<scene::AttachmentComponent>(sword);
+            const physanim::BodyLayout layout = physanim::layoutBody(*animator->model);
+            for (const i32 state : anim::attackChain(*animator->blendTree)) {
+                const i32 clip = anim::stateClip(*animator->blendTree, state);
+                if (clip < 0) continue;
+                // Attacks without physics bones yet: the weapon arm (a saved setup is kept).
+                anim::BlendNode& node = animator->blendTree->nodes[static_cast<usize>(animator->blendTree->stateMachine.states[static_cast<usize>(state)].motion)];
+                if (node.physicsJoints.empty()) node.physicsJoints = physanim::weaponArmJoints(layout, a.joint);
+                strikes.push_back(physanim::findStrikePoint(animator->model->skeleton, animator->model->clips[static_cast<usize>(clip)],
+                                                            a.joint, a.offset, registry.get<scene::WeaponComponent>(sword)));
+            }
+        }
+        const f32 rows = static_cast<f32>(std::max<usize>(strikes.size(), 1));
+        addBlock("Floor", {4.5f, -0.1f, -(rows - 1.0f) * kRow * 0.5f}, {12.0f, 0.1f, rows * kRow * 0.5f + 5.0f}, none,
+                 {0.30f, 0.32f, 0.36f});
+        struct Pillar {
+            const char* name;
+            scene::SurfaceMaterial material;
+            glm::vec3 color;
+        };
+        const std::array<Pillar, 5> pillars = {{
+            {"Stone", scene::SurfaceMaterial::Stone, {0.55f, 0.53f, 0.49f}},
+            {"Metal", scene::SurfaceMaterial::Metal, {0.62f, 0.68f, 0.76f}},
+            {"Wood", scene::SurfaceMaterial::Wood, {0.55f, 0.36f, 0.20f}},
+            {"Dirt", scene::SurfaceMaterial::Dirt, {0.36f, 0.27f, 0.18f}},
+            {"Flesh", scene::SurfaceMaterial::Flesh, {0.85f, 0.60f, 0.55f}},
+        }};
+        const glm::mat4 heroMatrix = registry.get<scene::TransformComponent>(hero).matrix(); // at the origin, facing +Z
+        for (usize k = 0; k < strikes.size(); ++k) {
+            // In the blade's path at the strike, relative to where the hero stands.
+            const physanim::TargetBox box = physanim::strikeTarget(strikes[k], heroMatrix);
+            for (usize i = 0; i < pillars.size(); ++i) {
+                const glm::vec3 station(static_cast<f32>(i) * kColumn, 0.0f, -static_cast<f32>(k) * kRow);
+                char name[64];
+                std::snprintf(name, sizeof(name), "%s (attack %zu)", pillars[i].name, k + 1);
+                const entt::entity e = addBlock(name, station + box.center, box.halfExtents, none, pillars[i].color);
+                registry.get<scene::ColliderComponent>(e).material = pillars[i].material;
+                // Where to stand: a flat pad (no collider), brighter for higher attack numbers.
+                std::snprintf(name, sizeof(name), "Stand here: key %zu", k + 1);
+                const f32 shade = 0.35f + 0.2f * static_cast<f32>(k);
+                const entt::entity pad = addBlock(name, station + glm::vec3(0.0f, 0.005f, 0.0f), {0.35f, 0.005f, 0.35f}, none,
+                                                  {shade, 0.75f, 0.35f});
+                registry.remove<scene::ColliderComponent>(pad);
+            }
+        }
+        m_selected = hero;
+        if (m_camera != entt::null) {
+            auto& cam = registry.get<scene::TransformComponent>(m_camera);
+            cam.position = {3.5f, 2.6f, -4.0f};
+            cam.rotation = scene::lookAtRotation(cam.position, {0.0f, 1.0f, 1.2f});
+        }
+    }
+
+    // Stops Play and removes everything but the camera.
+    void clearScene()
+    {
+        if (m_play.active()) {
+            m_play.stop(m_scene);
+        }
+        std::vector<entt::entity> old;
+        for (const entt::entity e : m_scene.registry().view<scene::NameComponent>()) {
+            if (e != m_camera) old.push_back(e);
+        }
+        for (const entt::entity e : old) {
+            renderer::destroyEntity(m_scene, renderer(), e);
+        }
+        m_eulerCache.clear();
+        m_selected = entt::null;
+    }
+
+    // Material test: one physics character per target (stone, metal, wood, dirt, flesh and a
+    // slanted stone slab). They all take the same input, so one click = six strikes side by side;
+    // the HUD lists what each blade did (rebound / glance / stop / cut / stuck).
+    void buildMaterialTestScene()
+    {
+        clearScene();
+        const editor::MeshAsset* character = nullptr;
+        for (const editor::MeshAsset& asset : m_drawer.assets()) {
+            if (asset.preset == "character") character = &asset;
+        }
+        if (!character) {
+            return;
+        }
+        const glm::quat none(1.0f, 0.0f, 0.0f, 0.0f);
+        const entt::entity floor = addBlock("Floor", {0.0f, -0.1f, 0.0f}, {12.0f, 0.1f, 12.0f}, none, {0.30f, 0.32f, 0.36f});
+        m_scene.registry().get<scene::ColliderComponent>(floor).material = scene::SurfaceMaterial::Stone;
+
+        struct Target {
+            const char* name;
+            scene::SurfaceMaterial material;
+            glm::vec3 color;
+            glm::vec3 half;
+            f32 slope; // degrees about X (0 = upright pillar)
+        };
+        const std::array<Target, 6> targets = {{
+            {"Stone pillar", scene::SurfaceMaterial::Stone, {0.55f, 0.53f, 0.49f}, {0.3f, 0.45f, 0.3f}, 0.0f},
+            {"Metal pillar", scene::SurfaceMaterial::Metal, {0.62f, 0.68f, 0.76f}, {0.3f, 0.45f, 0.3f}, 0.0f},
+            {"Wood pillar", scene::SurfaceMaterial::Wood, {0.55f, 0.36f, 0.20f}, {0.3f, 0.45f, 0.3f}, 0.0f},
+            {"Dirt mound", scene::SurfaceMaterial::Dirt, {0.36f, 0.27f, 0.18f}, {0.3f, 0.45f, 0.3f}, 0.0f},
+            {"Flesh dummy", scene::SurfaceMaterial::Flesh, {0.85f, 0.60f, 0.55f}, {0.3f, 0.45f, 0.3f}, 0.0f},
+            {"Stone slab 30", scene::SurfaceMaterial::Stone, {0.48f, 0.47f, 0.44f}, {0.3f, 0.06f, 0.6f}, -30.0f},
+        }};
+        constexpr f32 kSpacing = 1.8f;
+        entt::entity middle = entt::null;
+        for (usize i = 0; i < targets.size(); ++i) {
+            const Target& t = targets[i];
+            const f32 x = (static_cast<f32>(i) - 2.5f) * kSpacing;
+            // The sword arm is on the character's right (-X): the target sits in front of it, where
+            // the strike comes down (same placement as the Play strike test).
+            glm::vec3 center(x - 0.21f, t.half.y, 1.0f);
+            glm::quat rotation = none;
+            if (t.slope != 0.0f) {
+                rotation = glm::angleAxis(glm::radians(t.slope), glm::vec3(1.0f, 0.0f, 0.0f)); // top tilted towards the character: the blade (coming down and back) meets it at ~30 deg
+                center = {x - 0.21f, 0.45f, 1.05f};
+            }
+            const entt::entity e = addBlock(t.name, center, t.half, rotation, t.color);
+            m_scene.registry().get<scene::ColliderComponent>(e).material = t.material;
+
+            const entt::entity c = m_scene.createMesh(std::string("Swordsman (") + scene::surfaceProperties(t.material).name +
+                                                          (t.slope != 0.0f ? " slab)" : ")"),
+                                                      character->id, glm::vec4(0.78f, 0.64f, 0.52f, 1.0f));
+            renderer::enableAnimation(m_scene, renderer(), c, character->model);
+            m_scene.registry().emplace<scene::CharacterComponent>(c);
+            m_scene.registry().get<scene::TransformComponent>(c).position = {x, 0.0f, 0.0f};
+            if (i == 2) middle = c;
+        }
+        m_selected = middle;
+        if (m_camera != entt::null) {
+            auto& cam = m_scene.registry().get<scene::TransformComponent>(m_camera);
+            cam.position = {-2.0f, 2.4f, -5.5f};
+            cam.rotation = scene::lookAtRotation(cam.position, {-0.5f, 0.6f, 0.8f});
+        }
+    }
+
+    void buildIkTestScene()
+    {
+        clearScene();
+
+        const glm::quat none(1.0f, 0.0f, 0.0f, 0.0f);
+        const glm::vec3 ground(0.30f, 0.32f, 0.36f);
+        const glm::vec3 stone(0.52f, 0.50f, 0.46f);
+        addBlock("Floor", {0.0f, -0.1f, 0.0f}, {14.0f, 0.1f, 14.0f}, none, ground);
+
+        // Stairs ahead (+Z): 4 steps of 12 cm, then a landing.
+        for (int k = 0; k < 4; ++k) {
+            const f32 h = 0.12f * static_cast<f32>(k + 1);
+            addBlock("Step", {0.0f, h * 0.5f, 2.3f + 0.6f * static_cast<f32>(k)}, {1.0f, h * 0.5f, 0.3f}, none,
+                     glm::mix(ground, stone, 0.3f + 0.15f * static_cast<f32>(k)));
+        }
+        addBlock("Landing", {0.0f, 0.24f, 5.6f}, {1.0f, 0.24f, 0.6f}, none, glm::mix(ground, stone, 0.9f));
+
+        // Ramps: 12 degrees (right) and 22 degrees (left), rising towards +Z.
+        for (const auto& [x, degrees] : {std::pair{3.4f, 12.0f}, std::pair{-3.4f, 22.0f}}) {
+            const f32 a = glm::radians(degrees);
+            const f32 halfLength = 2.4f;
+            const glm::vec3 half(1.0f, 0.1f, halfLength);
+            const glm::quat r = glm::angleAxis(-a, glm::vec3(1.0f, 0.0f, 0.0f));
+            const f32 topCenter = halfLength * std::sin(a);
+            addBlock(degrees < 15.0f ? "Ramp 12" : "Ramp 22",
+                     {x, topCenter - half.y * std::cos(a), 1.2f + halfLength * std::cos(a)}, half, r, glm::mix(ground, stone, 0.5f));
+        }
+
+        // Rocks: low tilted blocks (behind the start, to the right).
+        const std::array<glm::vec4, 9> rocks = {{{4.5f, -2.0f, 0.06f, 10.0f}, {5.3f, -2.6f, 0.10f, 35.0f},
+                                                 {4.8f, -3.4f, 0.14f, 60.0f}, {5.9f, -1.6f, 0.08f, 80.0f},
+                                                 {6.4f, -3.0f, 0.18f, 15.0f}, {3.9f, -2.9f, 0.05f, 45.0f},
+                                                 {5.6f, -4.1f, 0.12f, 25.0f}, {6.8f, -2.2f, 0.07f, 70.0f},
+                                                 {4.4f, -4.4f, 0.09f, 5.0f}}};
+        for (const glm::vec4& rk : rocks) {
+            const glm::quat r = glm::angleAxis(glm::radians(rk.w), glm::vec3(0, 1, 0)) *
+                                glm::angleAxis(glm::radians(6.0f + rk.w * 0.1f), glm::vec3(1, 0, 0));
+            addBlock("Rock", {rk.x, rk.z * 0.5f, rk.y}, {0.28f, rk.z * 0.5f + 0.02f, 0.22f}, r, stone);
+        }
+
+        // Uneven tiles: 6 x 6 tiles of 50 cm, 0 - 15 cm high (behind the start, to the left).
+        for (int i = 0; i < 6; ++i) {
+            for (int j = 0; j < 6; ++j) {
+                const f32 h = 0.02f + 0.13f * static_cast<f32>((i * 7 + j * 13 + i * j * 5) % 11) / 10.0f;
+                addBlock("Tile", {-3.0f - 0.5f * static_cast<f32>(i), h * 0.5f, -1.8f - 0.5f * static_cast<f32>(j)},
+                         {0.25f, h * 0.5f, 0.25f}, none, glm::mix(ground, stone, h * 5.0f));
+            }
+        }
+
+        // The hero: the warrior, playable, with a sword in its hand.
+        const auto findAsset = [&](const std::string& name) -> std::optional<usize> {
+            for (usize i = 0; i < m_drawer.assets().size(); ++i) {
+                if (m_drawer.assets()[i].name == name) return i;
+            }
+            return std::nullopt;
+        };
+        spawnWarriorHero(glm::vec3(0.0f));
+        // The tentacle, to swing at (an animated mesh: no physics reaction yet).
+        if (const auto tentacle = findAsset("TestTentacle_Skinned")) {
+            const editor::MeshAsset& asset = *m_drawer.asset(*tentacle);
+            const entt::entity e = m_scene.createMesh("Tentacle", asset.id, glm::vec4(0.75f, 0.45f, 0.55f, 1.0f));
+            applyMaterial(e, asset);
+            if (asset.animated()) {
+                renderer::enableAnimation(m_scene, renderer(), e, asset.model);
+            }
+            const renderer::GpuMesh* mesh = renderer().mesh(asset.id);
+            auto& t = m_scene.registry().get<scene::TransformComponent>(e);
+            t.position = {1.8f, 0.0f, 1.2f};
+            if (mesh) {
+                const f32 height = std::max(mesh->boundsMax.y - mesh->boundsMin.y, 1e-3f);
+                t.scale = glm::vec3(1.6f / height); // about 1.6 m tall
+                t.position.y = -mesh->boundsMin.y * t.scale.y;
+            }
+        }
+
+        if (m_camera != entt::null) {
+            auto& cam = m_scene.registry().get<scene::TransformComponent>(m_camera);
+            cam.position = {-2.5f, 2.6f, -5.0f};
+            cam.rotation = scene::lookAtRotation(cam.position, {0.5f, 0.6f, 1.5f});
+        }
     }
 
     // Built-in presets: the physics character, a floor and a stone (both static box colliders).
@@ -669,6 +1056,14 @@ private:
             return;
         }
         m_eulerCache.erase(m_selected);
+        // Things attached to it (a sword in its hand) go with it.
+        std::vector<entt::entity> attached;
+        for (const entt::entity e : m_scene.registry().view<scene::AttachmentComponent>()) {
+            if (m_scene.registry().get<scene::AttachmentComponent>(e).parent == m_selected) attached.push_back(e);
+        }
+        for (const entt::entity e : attached) {
+            renderer::destroyEntity(m_scene, renderer(), e);
+        }
         renderer::destroyEntity(m_scene, renderer(), m_selected);
         m_selected = entt::null;
     }
@@ -716,7 +1111,15 @@ private:
             }
             m_playInput.run = ImGui::GetIO().KeyShift;
             m_playInput.toggleRagdoll = ImGui::IsKeyPressed(ImGuiKey_R, false);
+            m_playInput.jump = ImGui::IsKeyPressed(ImGuiKey_Space, false);
+            m_playInput.playAttack = -1;
+            for (int k = 0; k < 9; ++k) {
+                if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_1 + k), false)) m_playInput.playAttack = k;
+            }
             return;
+        }
+        if (m_animationEditor.focused()) {
+            return; // Del / F / Esc belong to the Actor Editor (graph) while it has focus
         }
         if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
             deleteSelected();
@@ -767,18 +1170,19 @@ private:
             const auto& name = m_scene.registry().get<scene::NameComponent>(entity).name;
             const char* icon = m_scene.registry().all_of<scene::CameraComponent>(entity)     ? "[cam] "
                                : m_scene.registry().all_of<scene::CharacterComponent>(entity) ? "[char] "
+                               : m_scene.registry().all_of<gameplay::CharacterControllerComponent>(entity) ? "[hero] "
                                : m_scene.registry().all_of<scene::AnimatorComponent>(entity) ? "[anim] "
                                                                                              : "";
             ImGui::PushID(static_cast<int>(entt::to_integral(entity)));
             if (ImGui::Selectable((std::string(icon) + name).c_str(), m_selected == entity,
                                   ImGuiSelectableFlags_AllowDoubleClick)) {
                 m_selected = entity;
-                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && isAnimated(entity)) {
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && canOpenActorEditor(entity)) {
                     m_animationEditor.open(entity);
                 }
             }
-            if (isAnimated(entity) && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-                ImGui::SetTooltip("Double-click: Animation Editor");
+            if (canOpenActorEditor(entity) && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip("Double-click: Actor Editor");
             }
             ImGui::PopID();
         }
@@ -790,6 +1194,8 @@ private:
         ImGui::End();
     }
 
+    // Inspector: name, transform and quick options only. Everything else about an actor (its
+    // components, animation graph, clips) lives in the Actor Editor (double-click the actor).
     void drawInspector()
     {
         ImGui::Begin("Inspector");
@@ -808,6 +1214,20 @@ private:
             name.name = buffer.data();
         }
         ImGui::Spacing();
+
+        // Attached to a bone (a sword in a hand): its transform is recomputed every frame from the
+        // socket, so the socket is what you edit.
+        if (registry.all_of<scene::AttachmentComponent>(m_selected)) {
+            drawSocketSection();
+            drawQuickOptions();
+            ImGui::Spacing();
+            ImGui::Separator();
+            if (ImGui::Button("Delete Actor", ImVec2(-FLT_MIN, 0))) {
+                deleteSelected();
+            }
+            ImGui::End();
+            return;
+        }
 
         if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen) && beginProperties("##transform")) {
             auto& transform = registry.get<scene::TransformComponent>(m_selected);
@@ -845,32 +1265,201 @@ private:
                 ImGui::DragFloatRange2("##clip", &camera->nearPlane, &camera->farPlane, 0.05f, 0.01f, 10000.0f);
                 ImGui::EndTable();
             }
+            ImGui::TextDisabled("The scene camera cannot be deleted.");
+            ImGui::End();
+            return;
         }
 
-        if (!registry.all_of<scene::CameraComponent>(m_selected)) {
-            if (registry.all_of<scene::MeshRendererComponent>(m_selected)) {
-                drawMeshComponent();
-            }
-            if (registry.all_of<scene::AnimatorComponent>(m_selected)) {
-                drawAnimatorComponent();
-            }
-            if (registry.all_of<scene::CharacterComponent>(m_selected)) {
-                drawCharacterComponent();
-            }
-            if (registry.all_of<scene::ColliderComponent>(m_selected)) {
-                drawColliderComponent();
-            }
-            drawAddComponent();
-        }
+        drawQuickOptions();
 
         ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.40f, 0.62f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.50f, 0.76f, 1.0f));
+        if (ImGui::Button("Open Actor Editor", ImVec2(-FLT_MIN, 30.0f))) {
+            m_animationEditor.open(m_selected);
+        }
+        ImGui::PopStyleColor(2);
+        tooltip("Components, animation graph, clips and skeleton (or double-click the actor)");
+        ImGui::Spacing();
         ImGui::Separator();
-        if (m_selected == m_camera) {
-            ImGui::TextDisabled("The scene camera cannot be deleted.");
-        } else if (ImGui::Button("Delete Actor", ImVec2(-FLT_MIN, 0))) {
+        if (ImGui::Button("Delete Actor", ImVec2(-FLT_MIN, 0))) {
             deleteSelected();
         }
         ImGui::End();
+    }
+
+    // Socket of an attached actor: which bone of which parent, and the offset in that bone's space
+    // (position in cm, rotation in degrees). Edits apply live, also during Play.
+    void drawSocketSection()
+    {
+        auto& registry = m_scene.registry();
+        auto& a = registry.get<scene::AttachmentComponent>(m_selected);
+        if (!ImGui::CollapsingHeader("Socket", ImGuiTreeNodeFlags_DefaultOpen) || !beginProperties("##socket")) {
+            return;
+        }
+        const auto* animator = registry.valid(a.parent) ? registry.try_get<scene::AnimatorComponent>(a.parent) : nullptr;
+        const anim::Skeleton* skeleton = animator && animator->model ? &animator->model->skeleton : nullptr;
+
+        property("Parent");
+        const auto* parentName = registry.valid(a.parent) ? registry.try_get<scene::NameComponent>(a.parent) : nullptr;
+        ImGui::TextDisabled("%s", parentName ? parentName->name.c_str() : "<none>");
+
+        property("Bone");
+        const bool validJoint = skeleton && a.joint >= 0 && static_cast<usize>(a.joint) < skeleton->jointCount();
+        if (ImGui::BeginCombo("##bone", validJoint ? skeleton->names()[static_cast<usize>(a.joint)].c_str() : "(actor origin)",
+                              ImGuiComboFlags_HeightLarge)) {
+            if (ImGui::Selectable("(actor origin)", a.joint < 0)) a.joint = -1;
+            for (usize j = 0; skeleton && j < skeleton->jointCount(); ++j) {
+                if (ImGui::Selectable(skeleton->names()[j].c_str(), a.joint == static_cast<i32>(j))) {
+                    a.joint = static_cast<i32>(j);
+                }
+            }
+            ImGui::EndCombo();
+        }
+        tooltip("The bone the actor follows");
+
+        // Offset = T * R (no scale); edit as cm + degrees, keeping the typed angles stable.
+        // The offset may carry the inverse of a bone scale (e.g. FBX rigs in cm): kept as is.
+        glm::mat3 basis(a.offset);
+        const glm::vec3 offsetScale(glm::length(basis[0]), glm::length(basis[1]), glm::length(basis[2]));
+        for (int i = 0; i < 3; ++i) {
+            if (offsetScale[i] > 1e-8f) basis[i] /= offsetScale[i];
+        }
+        // Position shown in the bone's axes, converted to metres of the attached actor.
+        const f32 unit = offsetScale.x > 1e-8f ? 1.0f / offsetScale.x : 1.0f;
+        glm::vec3 positionCm = glm::vec3(a.offset[3]) * unit * 100.0f;
+        const glm::quat rotation = glm::normalize(glm::quat_cast(basis));
+        EulerCache& euler = m_eulerCache[m_selected];
+        if (!euler.valid || euler.rotation != rotation) {
+            euler.degrees = scene::eulerDegreesNear(rotation, euler.valid ? euler.degrees : glm::vec3(0.0f));
+            euler.rotation = rotation;
+            euler.valid = true;
+        }
+        bool changed = false;
+        property("Position");
+        changed |= ImGui::DragFloat3("##socketPos", glm::value_ptr(positionCm), 0.1f, 0.0f, 0.0f, "%.1f cm");
+        tooltip("Offset from the bone, in the bone's own axes (cm). Ctrl+click to type a value.");
+        property("Rotation");
+        if (ImGui::DragFloat3("##socketRot", glm::value_ptr(euler.degrees), 0.5f, 0.0f, 0.0f, "%.1f deg")) {
+            euler.rotation = glm::quat(glm::radians(euler.degrees));
+            changed = true;
+        }
+        tooltip("Rotation relative to the bone (X, Y, Z degrees). The sword's blade runs along its +Y.");
+        if (changed) {
+            a.offset = glm::translate(glm::mat4(1.0f), positionCm / (100.0f * unit)) * glm::mat4_cast(euler.rotation) *
+                       glm::scale(glm::mat4(1.0f), offsetScale);
+        }
+        property("Keep scale");
+        ImGui::Checkbox("##inheritScale", &a.inheritScale);
+        tooltip("Off: keeps its own size in metres even if the parent is scaled");
+        ImGui::EndTable();
+
+        const f32 half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        if (ImGui::Button("Flip blade", ImVec2(half, 0))) {
+            a.offset = a.offset * glm::mat4_cast(glm::angleAxis(glm::pi<f32>(), glm::vec3(1.0f, 0.0f, 0.0f)));
+        }
+        tooltip("Turn 180 degrees about X (blade up <-> down)");
+        ImGui::SameLine();
+        const i32 hand = skeleton ? anim::findWeaponHand(*skeleton) : -1;
+        ImGui::BeginDisabled(hand < 0);
+        if (ImGui::Button("Reset to hand", ImVec2(-FLT_MIN, 0))) {
+            a.joint = hand;
+            a.offset = anim::weaponSocket(*skeleton, hand);
+        }
+        ImGui::EndDisabled();
+        tooltip("Automatic grip in the weapon hand (palm, between the fingers and the thumb)");
+    }
+
+    // The few things you toggle all the time, as one-line switches.
+    void drawQuickOptions()
+    {
+        auto& registry = m_scene.registry();
+        if (!ImGui::CollapsingHeader("Quick Options", ImGuiTreeNodeFlags_DefaultOpen) || !beginProperties("##quick")) {
+            return;
+        }
+        if (auto* mesh = registry.try_get<scene::MeshRendererComponent>(m_selected)) {
+            property("Visible");
+            ImGui::Checkbox("##visible", &mesh->visible);
+            property("Asset");
+            const editor::MeshAsset* asset = selectedAsset();
+            ImGui::TextDisabled("%s", asset ? asset->name.c_str() : "-");
+        }
+        if (auto* animator = registry.try_get<scene::AnimatorComponent>(m_selected)) {
+            if (animator->blendTree && !animator->blendTree->stateMachine.empty()) {
+                // Graph: which state (forcing one is a quick way to preview it).
+                anim::BlendTree& graph = *animator->blendTree;
+                property("State");
+                const i32 state = animator->treeState.state;
+                const char* current = graph.stateMachine.validState(state) ? graph.stateMachine.states[static_cast<usize>(state)].name.c_str() : "-";
+                if (ImGui::BeginCombo("##state", animator->useBlendTree ? current : "(graph off)")) {
+                    for (usize s = 0; s < graph.stateMachine.states.size(); ++s) {
+                        if (ImGui::Selectable(graph.stateMachine.states[s].name.c_str(), state == static_cast<i32>(s))) {
+                            animator->treeState.forceState(graph, static_cast<i32>(s));
+                            animator->useBlendTree = true;
+                            animator->bindPose = false;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+            } else {
+                property("Clip");
+                const auto clips = animator->clips();
+                const i32 clip = animator->player.clip();
+                const bool hasClip = clip >= 0 && static_cast<usize>(clip) < clips.size();
+                if (ImGui::BeginCombo("##clip", hasClip ? clips[static_cast<usize>(clip)].name().c_str() : "<none>")) {
+                    for (usize i = 0; i < clips.size(); ++i) {
+                        if (ImGui::Selectable(clips[i].name().c_str(), static_cast<i32>(i) == clip)) {
+                            animator->player.play(static_cast<i32>(i), 0.25f);
+                            animator->bindPose = false;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+            }
+            property("Foot IK");
+            if (ImGui::Checkbox("##footIK", &animator->footIK.enabled)) {
+                animator->footIKState = {};
+            }
+            tooltip("Feet follow the colliders under them (settings: Actor Editor > Animator)");
+
+            property("Playable");
+            bool playable = registry.all_of<gameplay::CharacterControllerComponent>(m_selected);
+            if (ImGui::Checkbox("##playable", &playable)) {
+                if (playable) {
+                    // A complete hero (graph, foot IK, controller) unless it already has a graph.
+                    if (!animator->blendTree) {
+                        m_heroMessage = editor::makePlayableHero(m_scene, m_selected, m_heroHeight).message;
+                        m_heroMessageFor = m_selected;
+                    } else {
+                        registry.emplace<gameplay::CharacterControllerComponent>(m_selected);
+                    }
+                } else {
+                    registry.remove<gameplay::CharacterControllerComponent>(m_selected);
+                }
+            }
+            tooltip("Controlled with WASD / Shift / Space in Play (F5). First time: scales the model to a human height, "
+                    "builds the locomotion graph and turns on foot IK.");
+        }
+        property("Collider");
+        bool collider = registry.all_of<scene::ColliderComponent>(m_selected);
+        if (registry.all_of<gameplay::CharacterControllerComponent>(m_selected) && !collider) {
+            ImGui::TextDisabled("controller capsule");
+            tooltip("A playable actor collides with its Character Controller's capsule (blue). A Box Collider is for "
+                    "static things: floors, walls, stones.");
+        } else if (ImGui::Checkbox("##collider", &collider)) {
+            if (collider) {
+                registry.emplace<scene::ColliderComponent>(m_selected);
+            } else {
+                registry.remove<scene::ColliderComponent>(m_selected);
+            }
+        }
+        tooltip("Static box: characters stand on it, swords hit it");
+        ImGui::EndTable();
+        if (!m_heroMessage.empty() && m_heroMessageFor == m_selected) {
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextDisabled("%s", m_heroMessage.c_str());
+            ImGui::PopTextWrapPos();
+        }
     }
 
     // Two-column property grid: label on the left, full-width widget on the right.
@@ -894,121 +1483,146 @@ private:
         ImGui::SetNextItemWidth(-FLT_MIN);
     }
 
+    [[nodiscard]] bool canOpenActorEditor(entt::entity entity) const
+    {
+        return m_scene.registry().valid(entity) && entity != m_camera;
+    }
+
     [[nodiscard]] bool isAnimated(entt::entity entity) const
     {
         const auto& registry = m_scene.registry();
         return registry.valid(entity) && registry.all_of<scene::AnimatorComponent>(entity);
     }
 
-    // Asset shown by the selected actor's Mesh Renderer.
-    [[nodiscard]] const editor::MeshAsset* selectedAsset() const
+    // Asset shown by an actor's Mesh Renderer.
+    [[nodiscard]] const editor::MeshAsset* assetOf(entt::entity entity) const
     {
         const auto& registry = m_scene.registry();
-        if (const auto* animator = registry.try_get<scene::AnimatorComponent>(m_selected)) {
-            return m_drawer.findByModel(animator->model.get());
+        if (const auto* animator = registry.try_get<scene::AnimatorComponent>(entity)) {
+            if (const editor::MeshAsset* asset = m_drawer.findByModel(animator->model.get())) {
+                return asset;
+            }
         }
-        const auto* mesh = registry.try_get<scene::MeshRendererComponent>(m_selected);
+        const auto* mesh = registry.try_get<scene::MeshRendererComponent>(entity);
+        if (const auto* animator = registry.try_get<scene::AnimatorComponent>(entity); animator && mesh) {
+            return m_drawer.findByMesh(animator->restMesh);
+        }
         return mesh ? m_drawer.findByMesh(mesh->mesh) : nullptr;
     }
+    [[nodiscard]] const editor::MeshAsset* selectedAsset() const { return assetOf(m_selected); }
 
-    // Mesh Renderer: which asset the actor shows, its tint and visibility.
-    void drawMeshComponent()
+    // --- Component settings (Actor Editor > Components) ----------------------------------------
+
+    void drawComponentDetails(entt::entity actor, editor::ComponentKind kind) override
+    {
+        switch (kind) {
+        case editor::ComponentKind::MeshRenderer: drawMeshDetails(actor); break;
+        case editor::ComponentKind::Animator: drawAnimatorDetails(actor); break;
+        case editor::ComponentKind::CharacterController: editor::drawCharacterControllerDetails(m_scene, actor); break;
+        case editor::ComponentKind::Collider: drawColliderDetails(actor); break;
+        case editor::ComponentKind::PhysicsCharacter: drawPhysicsCharacterDetails(actor); break;
+        }
+    }
+
+    void removeComponent(entt::entity actor, editor::ComponentKind kind) override
     {
         auto& registry = m_scene.registry();
-        bool keep = true;
-        if (ImGui::CollapsingHeader("Mesh Renderer", &keep, ImGuiTreeNodeFlags_DefaultOpen) && beginProperties("##mesh")) {
-            const editor::MeshAsset* current = selectedAsset();
+        switch (kind) {
+        case editor::ComponentKind::MeshRenderer: renderer::removeMesh(m_scene, renderer(), actor); break;
+        case editor::ComponentKind::Animator: renderer::disableAnimation(m_scene, renderer(), actor); break;
+        case editor::ComponentKind::CharacterController: registry.remove<gameplay::CharacterControllerComponent>(actor); break;
+        case editor::ComponentKind::Collider: registry.remove<scene::ColliderComponent>(actor); break;
+        case editor::ComponentKind::PhysicsCharacter: registry.remove<scene::CharacterComponent>(actor); break;
+        }
+    }
+
+    void drawAddComponentMenu(entt::entity actor) override
+    {
+        auto& registry = m_scene.registry();
+        const bool hasMesh = registry.all_of<scene::MeshRendererComponent>(actor);
+        if (ImGui::MenuItem("Mesh Renderer", nullptr, false, !hasMesh)) {
+            registry.emplace<scene::MeshRendererComponent>(actor, scene::kTriangleMesh,
+                                                           glm::vec4(kPalette[m_objectCounter++ % kPalette.size()], 1.0f));
+        }
+        const editor::MeshAsset* asset = assetOf(actor);
+        const bool canAnimate = hasMesh && !isAnimated(actor) && asset && asset->animated();
+        if (ImGui::MenuItem("Animator", nullptr, false, canAnimate)) {
+            renderer::enableAnimation(m_scene, renderer(), actor, asset->model);
+        }
+        if (!canAnimate && !isAnimated(actor) && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("Needs a Mesh Renderer showing an animated (ANIM) asset");
+        }
+        if (ImGui::MenuItem("Character Controller", nullptr, false, !registry.all_of<gameplay::CharacterControllerComponent>(actor))) {
+            registry.emplace<gameplay::CharacterControllerComponent>(actor);
+        }
+        if (ImGui::MenuItem("Box Collider", nullptr, false, !registry.all_of<scene::ColliderComponent>(actor))) {
+            registry.emplace<scene::ColliderComponent>(actor);
+        }
+    }
+
+    void drawMeshDetails(entt::entity actor)
+    {
+        auto& registry = m_scene.registry();
+        auto& mesh = registry.get<scene::MeshRendererComponent>(actor);
+        if (beginProperties("##mesh")) {
+            const editor::MeshAsset* current = assetOf(actor);
             property("Asset");
             if (const auto picked = m_drawer.assetCombo("##asset", current)) {
-                setMeshAsset(*picked, isAnimated(m_selected));
-                current = m_drawer.asset(*picked);
+                setMeshAsset(actor, *picked, isAnimated(actor));
             }
             tooltip("Pick an asset, or drag a tile from the Assets drawer onto this field");
-
-            auto& mesh = registry.get<scene::MeshRendererComponent>(m_selected);
             property("Tint");
             ImGui::ColorEdit3("##tint", glm::value_ptr(mesh.tint));
             property("Visible");
             ImGui::Checkbox("##visible", &mesh.visible);
             ImGui::EndTable();
-
-            if (current && current->animated() && !isAnimated(m_selected)) {
-                ImGui::TextDisabled("This asset has %zu animation clip(s).", current->model->clips.size());
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Add Animator")) {
-                    renderer::enableAnimation(m_scene, renderer(), m_selected, current->model);
-                }
-            }
         }
-        if (!keep) {
-            renderer::removeMesh(m_scene, renderer(), m_selected);
-        }
+        editor::drawMaterialSection(mesh, renderer());
     }
 
-    // Animator: playback settings only. Working with clips happens in the Animation Editor.
-    void drawAnimatorComponent()
+    void drawAnimatorDetails(entt::entity actor)
     {
-        bool keep = true;
-        if (ImGui::CollapsingHeader("Animator", &keep, ImGuiTreeNodeFlags_DefaultOpen) && beginProperties("##animator")) {
-            auto& animator = m_scene.registry().get<scene::AnimatorComponent>(m_selected);
-            anim::AnimationPlayer& player = animator.player;
-            const auto clips = animator.clips();
-            const i32 clip = player.clip();
-            const bool hasClip = clip >= 0 && static_cast<usize>(clip) < clips.size();
-
-            property("Clip");
-            if (ImGui::BeginCombo("##clip", hasClip ? clips[static_cast<usize>(clip)].name().c_str() : "<none>")) {
-                for (usize i = 0; i < clips.size(); ++i) {
-                    ImGui::PushID(static_cast<int>(i));
-                    if (ImGui::Selectable(clips[i].name().c_str(), static_cast<i32>(i) == clip)) {
-                        player.play(static_cast<i32>(i), 0.25f);
-                        animator.bindPose = false;
-                    }
-                    ImGui::SameLine();
-                    clipKindBadge(clips[i]);
-                    ImGui::PopID();
-                }
-                ImGui::EndCombo();
-            }
-            if (hasClip) {
-                property("Kind");
-                clipKindBadge(clips[static_cast<usize>(clip)]);
-            }
-            property("Loop");
-            ImGui::Checkbox("##loop", &player.loop);
-            property("Speed");
-            ImGui::SliderFloat("##speed", &player.speed, -2.0f, 3.0f, "x%.2f");
-            property("Playback");
-            ImGui::BeginDisabled(!hasClip);
-            if (ImGui::SmallButton(player.playing ? "Pause" : "Play")) {
-                player.playing = !player.playing;
+        auto& animator = m_scene.registry().get<scene::AnimatorComponent>(actor);
+        if (beginProperties("##animator")) {
+            property("Mode");
+            int mode = animator.useBlendTree && animator.blendTree ? 1 : 0;
+            if (ImGui::Combo("##mode", &mode, animator.blendTree ? "Single clip\0Animation graph\0" : "Single clip\0")) {
+                animator.useBlendTree = mode == 1;
                 animator.bindPose = false;
             }
-            ImGui::EndDisabled();
-            ImGui::SameLine();
-            if (hasClip) {
-                ImGui::TextDisabled("%.2f / %.2f s", static_cast<double>(player.time()),
-                                    static_cast<double>(clips[static_cast<usize>(clip)].duration()));
-            } else {
-                ImGui::TextDisabled("no clip");
-            }
+            tooltip("Animation graph: the state machine in the Animation Graph tab. Single clip: Clips & Timeline.");
             ImGui::EndTable();
-
-            if (ImGui::Button("Edit Animation...", ImVec2(-FLT_MIN, 0))) {
-                m_animationEditor.open(m_selected);
-            }
-            tooltip("Animation Editor: preview, clips, timeline and skeleton (or double-click the actor)");
         }
-        if (!keep) {
-            renderer::disableAnimation(m_scene, renderer(), m_selected);
+        if (!animator.blendTree) {
+            if (ImGui::Button("Create Locomotion Graph", ImVec2(-FLT_MIN, 0))) {
+                editor::rebuildLocomotionTree(m_scene, actor);
+            }
+        }
+        editor::drawFootIKSettings(m_scene, actor);
+
+        if (!m_scene.registry().all_of<gameplay::CharacterControllerComponent>(actor) &&
+            !m_scene.registry().all_of<scene::CharacterComponent>(actor)) {
+            ImGui::SeparatorText("Playable Hero");
+            ImGui::SetNextItemWidth(90.0f);
+            ImGui::DragFloat("Height (m)", &m_heroHeight, 0.01f, 0.3f, 4.0f, "%.2f");
+            if (ImGui::Button("Make Playable Hero", ImVec2(-FLT_MIN, 0))) {
+                m_heroMessage = editor::makePlayableHero(m_scene, actor, m_heroHeight).message;
+                m_heroMessageFor = actor;
+            }
+            tooltip("Scale to this height, locomotion graph (idle / walk / run / turns / jump), foot IK and a Character "
+                    "Controller - then Play (F5): WASD, Shift, Space");
+        }
+        if (!m_heroMessage.empty() && m_heroMessageFor == actor) {
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextDisabled("%s", m_heroMessage.c_str());
+            ImGui::PopTextWrapPos();
         }
     }
 
-    void drawCharacterComponent()
+    void drawPhysicsCharacterDetails(entt::entity actor)
     {
-        bool keep = true;
-        if (ImGui::CollapsingHeader("Character (physics)", &keep, ImGuiTreeNodeFlags_DefaultOpen) && beginProperties("##character")) {
-            auto& c = m_scene.registry().get<scene::CharacterComponent>(m_selected);
+        auto& c = m_scene.registry().get<scene::CharacterComponent>(actor);
+        if (beginProperties("##character")) {
             property("Walk speed");
             ImGui::SliderFloat("##walk", &c.walkSpeed, 0.5f, 3.0f, "%.1f m/s");
             property("Run speed");
@@ -1017,69 +1631,82 @@ private:
             ImGui::SliderFloat("##strength", &c.strength, 0.2f, 3.0f, "x%.2f");
             tooltip("Scales every muscle's strength (how hard the sword arm can push / resist)");
             ImGui::EndTable();
-            ImGui::TextDisabled("Play (F5): WASD move, Shift run, LMB attack, R ragdoll.");
-            ImGui::TextDisabled("Walk / Idle are regular animations; Strike is played by the muscles.");
         }
-        if (!keep) {
-            m_scene.registry().remove<scene::CharacterComponent>(m_selected);
-        }
+        ImGui::TextDisabled("Play (F5): WASD move, Shift run, LMB attack, R ragdoll.");
     }
 
-    void drawColliderComponent()
+    void drawColliderDetails(entt::entity actor)
     {
-        bool keep = true;
-        if (ImGui::CollapsingHeader("Box Collider", &keep, ImGuiTreeNodeFlags_DefaultOpen) && beginProperties("##collider")) {
-            auto& c = m_scene.registry().get<scene::ColliderComponent>(m_selected);
+        auto& c = m_scene.registry().get<scene::ColliderComponent>(actor);
+        if (beginProperties("##collider")) {
             property("Half extents");
             ImGui::DragFloat3("##half", glm::value_ptr(c.halfExtents), 0.01f, 0.01f, 100.0f);
             property("Offset");
             ImGui::DragFloat3("##offset", glm::value_ptr(c.offset), 0.01f);
+            property("Material");
+            const scene::SurfaceProperties& current = scene::surfaceProperties(c.material);
+            if (ImGui::BeginCombo("##material", current.name)) {
+                for (u8 m = 0; m < static_cast<u8>(scene::SurfaceMaterial::Count); ++m) {
+                    const auto material = static_cast<scene::SurfaceMaterial>(m);
+                    const scene::SurfaceProperties& p = scene::surfaceProperties(material);
+                    if (ImGui::Selectable(p.name, material == c.material)) c.material = material;
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                        ImGui::SetTooltip("hardness %.2f, bounce %.2f, friction %.2f%s", static_cast<double>(p.hardness),
+                                          static_cast<double>(p.restitution), static_cast<double>(p.friction),
+                                          p.hardness < 0.65f ? "\nsoft: a blade cuts in" : "\nhard: a blade stops / deflects");
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            // "On hit" event: the effect played where this is struck.
+            property("On hit");
+            const std::string fallback = "hit_" + lowerCase(scene::surfaceProperties(c.material).name);
+            const std::string label = c.onHit.empty() ? fallback + " (material)" : c.onHit;
+            if (ImGui::BeginCombo("##onHit", label.c_str())) {
+                if (ImGui::Selectable((fallback + " (material)").c_str(), c.onHit.empty())) c.onHit.clear();
+                if (ImGui::Selectable("none", c.onHit == "none")) c.onHit = "none";
+                for (const std::string& name : m_vfxLibrary.names()) {
+                    if (ImGui::Selectable(name.c_str(), c.onHit == name)) c.onHit = name;
+                }
+                ImGui::EndCombo();
+            }
+            tooltip("Effect played where a weapon strikes this (assets/vfx/*.vfx). By default the material's: hit_stone,\n"
+                    "hit_metal, hit_wood, hit_dirt, hit_flesh.");
             ImGui::EndTable();
-            ImGui::TextDisabled("Static: characters stand on it and swords hit it in Play.");
         }
-        if (!keep) {
-            m_scene.registry().remove<scene::ColliderComponent>(m_selected);
-        }
+        ImGui::TextDisabled("Static: characters stand on it and swords hit it in Play.");
     }
 
-    void drawAddComponent()
+    static std::string lowerCase(std::string text)
     {
-        ImGui::Spacing();
-        if (ImGui::Button("+ Add Component", ImVec2(-FLT_MIN, 0))) {
-            ImGui::OpenPopup("##addComponent");
-        }
-        if (ImGui::BeginPopup("##addComponent")) {
-            auto& registry = m_scene.registry();
-            const bool hasMesh = registry.all_of<scene::MeshRendererComponent>(m_selected);
-            if (ImGui::MenuItem("Box Collider", nullptr, false, !registry.all_of<scene::ColliderComponent>(m_selected))) {
-                registry.emplace<scene::ColliderComponent>(m_selected);
-            }
-            if (ImGui::MenuItem("Mesh Renderer", nullptr, false, !hasMesh)) {
-                registry.emplace<scene::MeshRendererComponent>(
-                    m_selected, scene::kTriangleMesh, glm::vec4(kPalette[m_objectCounter++ % kPalette.size()], 1.0f));
-            }
-            const editor::MeshAsset* asset = selectedAsset();
-            const bool canAnimate = hasMesh && !isAnimated(m_selected) && asset && asset->animated();
-            if (ImGui::MenuItem("Animator", nullptr, false, canAnimate)) {
-                renderer::enableAnimation(m_scene, renderer(), m_selected, asset->model);
-            }
-            if (!canAnimate && !isAnimated(m_selected) &&
-                ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                ImGui::SetTooltip("Needs a Mesh Renderer showing an animated (ANIM) asset");
-            }
-            ImGui::EndPopup();
-        }
+        std::ranges::transform(text, text.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        return text;
     }
 
-    // [KIN] regular animation / [PHYS] played by muscles of a physics body.
-    static void clipKindBadge(const anim::AnimationClip& clip)
+    // Saves an actor's settings file (<model>.actor: graph, physics bones, weapon sockets) when
+    // they change. Checked once a second, not while playing; the first look only notes the state.
+    void autosaveActors(f32 dt)
     {
-        if (clip.kind() == anim::ClipKind::Physics) {
-            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.25f, 1.0f), "[PHYS]");
-            tooltip("Physics animation: in Play the muscles follow this clip; hits and rebounds are simulated");
-        } else {
-            ImGui::TextColored(ImVec4(0.45f, 0.7f, 1.0f, 1.0f), "[KIN]");
-            tooltip("Regular (kinematic) animation: the pose is shown as it is in the clip");
+        m_autosaveTimer += dt;
+        if (m_autosaveTimer < 1.0f || m_play.active()) {
+            return;
+        }
+        m_autosaveTimer = 0.0f;
+        auto& registry = m_scene.registry();
+        for (auto it = m_actorSaved.begin(); it != m_actorSaved.end();) {
+            it = registry.valid(it->first) ? std::next(it) : m_actorSaved.erase(it);
+        }
+        for (const entt::entity e : registry.view<scene::AnimatorComponent>()) {
+            const auto& animator = registry.get<scene::AnimatorComponent>(e);
+            if (!animator.model || !animator.blendTree || editor::actorFilePath(*animator.model).empty()) continue;
+            std::string text = editor::actorToJson(m_scene, e).dump();
+            auto [entry, first] = m_actorSaved.try_emplace(e, text);
+            if (first || entry->second == text) continue;
+            std::string message;
+            if (editor::saveActor(m_scene, e, &message)) {
+                KN_INFO("{}", message);
+                entry->second = std::move(text);
+            }
         }
     }
 
@@ -1091,16 +1718,17 @@ private:
     }
 
     // Switches the selected actor's mesh to drawer asset `index`, staying animated if possible.
-    void setMeshAsset(usize index, bool wasAnimated)
+    void setMeshAsset(entt::entity actor, usize index, bool wasAnimated)
     {
         const editor::MeshAsset* asset = m_drawer.asset(index);
         if (!asset) {
             return;
         }
-        renderer::disableAnimation(m_scene, renderer(), m_selected);
-        m_scene.registry().get<scene::MeshRendererComponent>(m_selected).mesh = asset->id;
+        renderer::disableAnimation(m_scene, renderer(), actor);
+        m_scene.registry().get<scene::MeshRendererComponent>(actor).mesh = asset->id;
+        applyMaterial(actor, *asset);
         if (asset->animated() && wasAnimated) {
-            renderer::enableAnimation(m_scene, renderer(), m_selected, asset->model);
+            renderer::enableAnimation(m_scene, renderer(), actor, asset->model);
         }
     }
 
@@ -1111,12 +1739,18 @@ private:
     bool m_layoutInitialized = false;
     bool m_showGrid = true;
     bool m_showSelectionBox = true;
+    bool m_showGizmos = true;        // the selected actor's components (collider, controller, foot IK)
+    bool m_showAllColliders = false; // every collider in the scene
     bool m_showSkeleton = true; // skeleton of the selected animated actor in the Viewport
     bool m_lookBlocked = false;
     editor::AssetDrawer m_drawer;
     editor::AnimationEditor m_animationEditor;
     editor::SwordStrikeTest m_swordTest;
     editor::PlayMode m_play;
+    vfx::VfxLibrary m_vfxLibrary;
+    renderer::VfxRenderState m_vfxRender;
+    std::unordered_map<entt::entity, std::string> m_actorSaved; // last saved / seen actor file text
+    f32 m_autosaveTimer = 0.0f;
     editor::PlayInput m_playInput;
     glm::vec2 m_playOrbit{0.0f};
     f32 m_playWheel = 0.0f;
@@ -1134,6 +1768,10 @@ private:
     std::unordered_map<entt::entity, EulerCache> m_eulerCache;
 
     usize m_objectCounter = 1;
+    f32 m_heroHeight = 1.8f;
+    scene::MeshId m_swordMesh = renderer::Renderer::kInvalidMesh;
+    std::string m_heroMessage;
+    entt::entity m_heroMessageFor = entt::null;
 };
 
 int main(int argc, char** argv)

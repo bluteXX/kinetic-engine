@@ -1,0 +1,15 @@
+// Blade into wood: splinters and chips fly off, a little sawdust.
+{
+  "name": "Wood hit",
+  "emitters": [
+    { "name": "splinters", "shape": "spark", "count": 10, "color": [0.78, 0.6, 0.38],
+      "size": [0.004, 0.008], "speed": [1.5, 4.0], "spread": 55, "slide": 0.5, "inherit": 0.1,
+      "lifetime": [0.4, 0.8], "gravity": 1.0, "drag": 0.6, "stretch": 0.02, "bounce": 0.2 },
+    { "name": "chips", "shape": "shard", "count": 12, "color": [0.6, 0.42, 0.24],
+      "size": [0.008, 0.018], "speed": [1.0, 3.0], "spread": 60, "slide": 0.4,
+      "lifetime": [0.6, 1.1], "gravity": 1.0, "drag": 0.5, "spin": 16, "bounce": 0.25 },
+    { "name": "sawdust", "shape": "puff", "count": 5, "color": [0.82, 0.7, 0.52],
+      "size": [0.015, 0.03], "grow": 3.0, "speed": [0.2, 0.6], "spread": 80,
+      "lifetime": [0.4, 0.7], "gravity": 0.05, "drag": 2.5, "scaleWithSpeed": false }
+  ]
+}

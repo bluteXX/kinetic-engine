@@ -11,9 +11,11 @@ namespace kinetic::renderer {
 
 namespace {
 
+// Stream 0 (stream 1 holds the uvs).
 struct MeshVertex {
     glm::vec3 position;
     glm::vec3 normal;
+    glm::vec4 tangent;
 };
 
 using LineVertex = DebugVertex;
@@ -21,13 +23,17 @@ using LineVertex = DebugVertex;
 struct MeshDrawUniforms {
     glm::mat4 mvp;
     glm::mat4 normalMatrix;
+    glm::mat4 model;
 };
 
 struct MaterialUniforms {
     glm::vec4 tint;
     glm::vec4 keyLightDir;
     glm::vec4 cameraDir;
+    glm::vec4 params; // x = normal strength, y = normal map green sign (+1 OpenGL, -1 DirectX)
 };
+
+constexpr glm::vec4 kDefaultTangent{1.0f, 0.0f, 0.0f, 1.0f};
 
 const glm::vec3 kKeyLightDir = glm::normalize(glm::vec3(0.4f, 0.8f, 0.45f));
 
@@ -108,7 +114,7 @@ bool Renderer::init(gfx::Device& device)
         KN_ERROR("No supported depth format");
         return false;
     }
-    if (!createPipelines() || !createGrid()) {
+    if (!createPipelines() || !createGrid() || !createTextureDefaults()) {
         return false;
     }
     return addMesh("Triangle", makeTriangle()) == scene::kTriangleMesh;
@@ -133,12 +139,13 @@ bool Renderer::createPipelines()
     base.target_info.depth_stencil_format = m_depthFormat;
 
     const auto build = [&](const char* name, SDL_GPUGraphicsPipelineCreateInfo info, u32 vsUniforms,
-                           u32 fsUniforms) -> SDL_GPUGraphicsPipeline* {
+                           u32 fsUniforms, u32 fsSamplers) -> SDL_GPUGraphicsPipeline* {
         const std::string base_ = name;
         SDL_GPUShader* vs = m_device->loadShader(
             {.name = base_ + ".vert", .stage = SDL_GPU_SHADERSTAGE_VERTEX, .uniformBuffers = vsUniforms});
         SDL_GPUShader* fs = m_device->loadShader(
-            {.name = base_ + ".frag", .stage = SDL_GPU_SHADERSTAGE_FRAGMENT, .uniformBuffers = fsUniforms});
+            {.name = base_ + ".frag", .stage = SDL_GPU_SHADERSTAGE_FRAGMENT, .samplers = fsSamplers,
+             .uniformBuffers = fsUniforms});
         SDL_GPUGraphicsPipeline* pipeline = nullptr;
         if (vs && fs) {
             info.vertex_shader = vs;
@@ -154,9 +161,9 @@ bool Renderer::createPipelines()
     };
 
     // Test triangle: no vertex input, no depth test.
-    m_trianglePipeline = build("triangle", base, 0, 0);
+    m_trianglePipeline = build("triangle", base, 0, 0, 0);
 
-    // Meshes and lines share the vertex layout shape: two float3 attributes in one buffer.
+    // Lines: two float3 attributes in one buffer.
     const auto twoFloat3 = [](Uint32 pitch, Uint32 offset0, Uint32 offset1,
                               SDL_GPUVertexBufferDescription& buffer,
                               std::array<SDL_GPUVertexAttribute, 2>& attributes) {
@@ -168,19 +175,29 @@ bool Renderer::createPipelines()
                        {1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offset1}}};
     };
 
-    SDL_GPUVertexBufferDescription meshBuffer{};
-    std::array<SDL_GPUVertexAttribute, 2> meshAttributes{};
-    twoFloat3(sizeof(MeshVertex), offsetof(MeshVertex, position), offsetof(MeshVertex, normal), meshBuffer,
-              meshAttributes);
+    // Meshes: stream 0 = position, normal, tangent; stream 1 = uv.
+    std::array<SDL_GPUVertexBufferDescription, 2> meshBuffers{};
+    meshBuffers[0].slot = 0;
+    meshBuffers[0].pitch = sizeof(MeshVertex);
+    meshBuffers[0].input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+    meshBuffers[1].slot = 1;
+    meshBuffers[1].pitch = sizeof(glm::vec2);
+    meshBuffers[1].input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+    const std::array<SDL_GPUVertexAttribute, 4> meshAttributes = {{
+        {0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(MeshVertex, position)},
+        {1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(MeshVertex, normal)},
+        {2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(MeshVertex, tangent)},
+        {3, 1, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 0},
+    }};
     SDL_GPUGraphicsPipelineCreateInfo mesh = base;
-    mesh.vertex_input_state.vertex_buffer_descriptions = &meshBuffer;
-    mesh.vertex_input_state.num_vertex_buffers = 1;
+    mesh.vertex_input_state.vertex_buffer_descriptions = meshBuffers.data();
+    mesh.vertex_input_state.num_vertex_buffers = static_cast<Uint32>(meshBuffers.size());
     mesh.vertex_input_state.vertex_attributes = meshAttributes.data();
-    mesh.vertex_input_state.num_vertex_attributes = 2;
+    mesh.vertex_input_state.num_vertex_attributes = static_cast<Uint32>(meshAttributes.size());
     mesh.depth_stencil_state.enable_depth_test = true;
     mesh.depth_stencil_state.enable_depth_write = true;
     mesh.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS;
-    m_meshPipeline = build("mesh", mesh, 1, 1);
+    m_meshPipeline = build("mesh", mesh, 1, 1, 2);
 
     SDL_GPUVertexBufferDescription lineBuffer{};
     std::array<SDL_GPUVertexAttribute, 2> lineAttributes{};
@@ -189,14 +206,16 @@ bool Renderer::createPipelines()
     SDL_GPUGraphicsPipelineCreateInfo line = mesh;
     line.primitive_type = SDL_GPU_PRIMITIVETYPE_LINELIST;
     line.vertex_input_state.vertex_buffer_descriptions = &lineBuffer;
+    line.vertex_input_state.num_vertex_buffers = 1;
     line.vertex_input_state.vertex_attributes = lineAttributes.data();
+    line.vertex_input_state.num_vertex_attributes = static_cast<Uint32>(lineAttributes.size());
     line.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
-    m_linePipeline = build("line", line, 1, 0);
+    m_linePipeline = build("line", line, 1, 0, 0);
 
     SDL_GPUGraphicsPipelineCreateInfo overlay = line;
     overlay.depth_stencil_state.enable_depth_test = false;
     overlay.depth_stencil_state.enable_depth_write = false;
-    m_overlayLinePipeline = build("line", overlay, 1, 0);
+    m_overlayLinePipeline = build("line", overlay, 1, 0, 0);
 
     return m_trianglePipeline && m_meshPipeline && m_linePipeline && m_overlayLinePipeline;
 }
@@ -229,14 +248,18 @@ scene::MeshId Renderer::addMesh(std::string name, const MeshData& data, MeshUsag
         return kInvalidMesh;
     }
     std::vector<MeshVertex> vertices(data.positions.size());
+    const bool tangents = data.hasTangents();
     for (usize i = 0; i < vertices.size(); ++i) {
-        vertices[i] = {data.positions[i], data.normals[i]};
+        vertices[i] = {data.positions[i], data.normals[i], tangents ? data.tangents[i] : kDefaultTangent};
     }
+    const std::vector<glm::vec2> uvs =
+        data.hasUvs() ? data.uvs : std::vector<glm::vec2>(vertices.size(), glm::vec2(0.0f));
 
     GpuMesh mesh;
     mesh.name = std::move(name);
     mesh.vertexBuffer =
         uploadBuffer(m_device->handle(), SDL_GPU_BUFFERUSAGE_VERTEX, std::as_bytes(std::span(vertices)));
+    mesh.uvBuffer = uploadBuffer(m_device->handle(), SDL_GPU_BUFFERUSAGE_VERTEX, std::as_bytes(std::span(uvs)));
     mesh.indexBuffer =
         uploadBuffer(m_device->handle(), SDL_GPU_BUFFERUSAGE_INDEX, std::as_bytes(std::span(data.indices)));
     mesh.indexCount = static_cast<u32>(data.indices.size());
@@ -252,8 +275,9 @@ scene::MeshId Renderer::addMesh(std::string name, const MeshData& data, MeshUsag
         stagingInfo.size = static_cast<Uint32>(vertices.size() * sizeof(MeshVertex));
         mesh.staging = SDL_CreateGPUTransferBuffer(m_device->handle(), &stagingInfo);
     }
-    if (!mesh.vertexBuffer || !mesh.indexBuffer || (mesh.dynamic && !mesh.staging)) {
+    if (!mesh.vertexBuffer || !mesh.uvBuffer || !mesh.indexBuffer || (mesh.dynamic && !mesh.staging)) {
         if (mesh.vertexBuffer) SDL_ReleaseGPUBuffer(m_device->handle(), mesh.vertexBuffer);
+        if (mesh.uvBuffer) SDL_ReleaseGPUBuffer(m_device->handle(), mesh.uvBuffer);
         if (mesh.indexBuffer) SDL_ReleaseGPUBuffer(m_device->handle(), mesh.indexBuffer);
         if (mesh.staging) SDL_ReleaseGPUTransferBuffer(m_device->handle(), mesh.staging);
         return kInvalidMesh;
@@ -263,7 +287,7 @@ scene::MeshId Renderer::addMesh(std::string name, const MeshData& data, MeshUsag
 }
 
 bool Renderer::updateMeshVertices(scene::MeshId id, std::span<const glm::vec3> positions,
-                                  std::span<const glm::vec3> normals)
+                                  std::span<const glm::vec3> normals, std::span<const glm::vec4> tangents)
 {
     if (id >= m_meshes.size()) {
         return false;
@@ -277,8 +301,9 @@ bool Renderer::updateMeshVertices(scene::MeshId id, std::span<const glm::vec3> p
     if (!mapped) {
         return false;
     }
+    const bool hasTangents = tangents.size() == positions.size();
     for (usize i = 0; i < positions.size(); ++i) {
-        mapped[i] = {positions[i], normals[i]};
+        mapped[i] = {positions[i], normals[i], hasTangents ? tangents[i] : kDefaultTangent};
     }
     SDL_UnmapGPUTransferBuffer(m_device->handle(), mesh.staging);
     mesh.uploadPending = true;
@@ -294,14 +319,124 @@ void Renderer::removeMesh(scene::MeshId id)
     SDL_GPUDevice* gpu = m_device->handle();
     // SDL_GPU defers the actual release until command buffers using them have finished.
     if (mesh.vertexBuffer) SDL_ReleaseGPUBuffer(gpu, mesh.vertexBuffer);
+    if (mesh.uvBuffer) SDL_ReleaseGPUBuffer(gpu, mesh.uvBuffer);
     if (mesh.indexBuffer) SDL_ReleaseGPUBuffer(gpu, mesh.indexBuffer);
     if (mesh.staging) SDL_ReleaseGPUTransferBuffer(gpu, mesh.staging);
     mesh.vertexBuffer = nullptr;
+    mesh.uvBuffer = nullptr;
     mesh.indexBuffer = nullptr;
     mesh.staging = nullptr;
     mesh.uploadPending = false;
     mesh.positions = {};
     mesh.indices = {};
+}
+
+bool Renderer::createTextureDefaults()
+{
+    SDL_GPUSamplerCreateInfo info{};
+    info.min_filter = SDL_GPU_FILTER_LINEAR;
+    info.mag_filter = SDL_GPU_FILTER_LINEAR;
+    info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
+    info.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+    info.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+    info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+    info.max_lod = 1000.0f;
+    info.enable_anisotropy = true;
+    info.max_anisotropy = 8.0f;
+    m_sampler = SDL_CreateGPUSampler(m_device->handle(), &info);
+    if (!m_sampler) {
+        KN_ERROR("SDL_CreateGPUSampler failed: {}", SDL_GetError());
+        return false;
+    }
+    const auto solid = [](u8 r, u8 g, u8 b) {
+        ImageData image;
+        image.width = 4;
+        image.height = 4;
+        image.rgba.resize(4 * 4 * 4);
+        for (usize i = 0; i < 16; ++i) {
+            image.rgba[i * 4 + 0] = r;
+            image.rgba[i * 4 + 1] = g;
+            image.rgba[i * 4 + 2] = b;
+            image.rgba[i * 4 + 3] = 255;
+        }
+        return image;
+    };
+    return addTexture("<white>", solid(255, 255, 255)) == scene::kWhiteTexture &&
+           addTexture("<flat normal>", solid(128, 128, 255)) == scene::kFlatNormalTexture;
+}
+
+scene::TextureId Renderer::addTexture(std::string name, const ImageData& image)
+{
+    if (image.empty()) {
+        KN_ERROR("addTexture('{}'): empty image", name);
+        return kInvalidTexture;
+    }
+    SDL_GPUDevice* gpu = m_device->handle();
+    u32 levels = 1;
+    for (u32 size = std::max(image.width, image.height); size > 1; size >>= 1) {
+        ++levels;
+    }
+    SDL_GPUTextureCreateInfo info{};
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    // Colour target usage is required to generate the mip chain on the GPU.
+    info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+    info.width = image.width;
+    info.height = image.height;
+    info.layer_count_or_depth = 1;
+    info.num_levels = levels;
+    SDL_GPUTexture* texture = SDL_CreateGPUTexture(gpu, &info);
+    if (!texture) {
+        KN_ERROR("addTexture('{}'): {}", name, SDL_GetError());
+        return kInvalidTexture;
+    }
+
+    const auto bytes = static_cast<Uint32>(usize{image.width} * image.height * 4);
+    SDL_GPUTransferBufferCreateInfo transferInfo{};
+    transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+    transferInfo.size = bytes;
+    SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(gpu, &transferInfo);
+    if (!transfer) {
+        KN_ERROR("addTexture('{}'): {}", name, SDL_GetError());
+        SDL_ReleaseGPUTexture(gpu, texture);
+        return kInvalidTexture;
+    }
+    void* mapped = SDL_MapGPUTransferBuffer(gpu, transfer, false);
+    std::memcpy(mapped, image.rgba.data(), bytes);
+    SDL_UnmapGPUTransferBuffer(gpu, transfer);
+
+    // Own command buffer, submitted now: ordered before any frame that samples the texture.
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu);
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUTextureTransferInfo src{};
+    src.transfer_buffer = transfer;
+    src.pixels_per_row = image.width;
+    src.rows_per_layer = image.height;
+    SDL_GPUTextureRegion dst{};
+    dst.texture = texture;
+    dst.w = image.width;
+    dst.h = image.height;
+    dst.d = 1;
+    SDL_UploadToGPUTexture(copy, &src, &dst, false);
+    SDL_EndGPUCopyPass(copy);
+    if (levels > 1) {
+        SDL_GenerateMipmapsForGPUTexture(cmd, texture);
+    }
+    SDL_SubmitGPUCommandBuffer(cmd);
+    SDL_ReleaseGPUTransferBuffer(gpu, transfer);
+
+    m_textures.push_back({std::move(name), texture, image.width, image.height});
+    return static_cast<scene::TextureId>(m_textures.size() - 1);
+}
+
+scene::TextureId Renderer::findTexture(std::string_view name) const
+{
+    for (usize i = 0; i < m_textures.size(); ++i) {
+        if (m_textures[i].alive() && m_textures[i].name == name) {
+            return static_cast<scene::TextureId>(i);
+        }
+    }
+    return kInvalidTexture;
 }
 
 void Renderer::setOverlayLines(std::vector<DebugVertex> lines, u32 layer)
@@ -437,10 +572,17 @@ void Renderer::shutdown()
     SDL_GPUDevice* gpu = m_device->handle();
     for (GpuMesh& mesh : m_meshes) {
         if (mesh.vertexBuffer) SDL_ReleaseGPUBuffer(gpu, mesh.vertexBuffer);
+        if (mesh.uvBuffer) SDL_ReleaseGPUBuffer(gpu, mesh.uvBuffer);
         if (mesh.indexBuffer) SDL_ReleaseGPUBuffer(gpu, mesh.indexBuffer);
         if (mesh.staging) SDL_ReleaseGPUTransferBuffer(gpu, mesh.staging);
     }
     m_meshes.clear();
+    for (GpuTexture& texture : m_textures) {
+        if (texture.texture) SDL_ReleaseGPUTexture(gpu, texture.texture);
+    }
+    m_textures.clear();
+    if (m_sampler) SDL_ReleaseGPUSampler(gpu, m_sampler);
+    m_sampler = nullptr;
     for (OverlayLayer& layer : m_overlays) {
         if (layer.buffer) SDL_ReleaseGPUBuffer(gpu, layer.buffer);
         if (layer.staging) SDL_ReleaseGPUTransferBuffer(gpu, layer.staging);
@@ -545,14 +687,23 @@ void Renderer::drawScene(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, con
             continue;
         }
         const glm::mat4 model = transform.matrix();
-        const MeshDrawUniforms draw{viewProjection * model, glm::transpose(glm::inverse(model))};
-        const MaterialUniforms material{renderer.tint, glm::vec4(kKeyLightDir, 0.0f), glm::vec4(cameraDir, 0.0f)};
+        const MeshDrawUniforms draw{viewProjection * model, glm::transpose(glm::inverse(model)), model};
+        const MaterialUniforms material{renderer.tint, glm::vec4(kKeyLightDir, 0.0f), glm::vec4(cameraDir, 0.0f),
+                                        glm::vec4(renderer.normalStrength, renderer.flipNormalY ? -1.0f : 1.0f, 0.0f, 0.0f)};
         SDL_PushGPUVertexUniformData(cmd, 0, &draw, sizeof(draw));
         SDL_PushGPUFragmentUniformData(cmd, 0, &material, sizeof(material));
 
-        const SDL_GPUBufferBinding vertices{mesh->vertexBuffer, 0};
+        const GpuTexture* base = texture(renderer.baseColorTexture);
+        const GpuTexture* normal = texture(renderer.normalTexture);
+        const std::array<SDL_GPUTextureSamplerBinding, 2> samplers = {{
+            {(base ? base : &m_textures[scene::kWhiteTexture])->texture, m_sampler},
+            {(normal ? normal : &m_textures[scene::kFlatNormalTexture])->texture, m_sampler},
+        }};
+        SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), static_cast<Uint32>(samplers.size()));
+
+        const std::array<SDL_GPUBufferBinding, 2> vertices = {{{mesh->vertexBuffer, 0}, {mesh->uvBuffer, 0}}};
         const SDL_GPUBufferBinding indices{mesh->indexBuffer, 0};
-        SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
+        SDL_BindGPUVertexBuffers(pass, 0, vertices.data(), static_cast<Uint32>(vertices.size()));
         SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
         SDL_DrawGPUIndexedPrimitives(pass, mesh->indexCount, 1, 0, 0, 0);
     }

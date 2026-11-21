@@ -2,14 +2,18 @@
 
 #include <kinetic/animation/AnimationPlayer.h>
 #include <kinetic/animation/Skinning.h>
+#include <kinetic/physanim/HitTracker.h>
+#include <kinetic/physanim/PhysicalBody.h>
 #include <kinetic/physics/PhysicsWorld.h>
 #include <kinetic/renderer/Renderer.h>
 #include <kinetic/scene/Scene.h>
+#include <kinetic/vfx/Vfx.h>
 
 #include <imgui.h>
 
 #include <array>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -21,6 +25,8 @@ struct PlayInput {
     bool run = false;
     bool attack = false;        // pressed this frame
     bool toggleRagdoll = false; // pressed this frame
+    bool jump = false;          // pressed this frame (heroes)
+    i32 playAttack = -1;        // pressed this frame: start the combo's attack N (0-based) directly (testing)
     f32 cameraYaw = 0.0f;       // radians; forward = (sin yaw, 0, cos yaw)
 };
 
@@ -36,17 +42,15 @@ public:
     enum class Mode : u8 { Locomotion, Attack, Ragdoll };
     enum class AttackPhase : u8 { Swing, Reflex, Recover };
 
-    struct Hit {
-        f32 impulse = 0.0f;     // N s
-        f32 peakLoad[3] = {};   // shoulder, elbow, wrist
-        f32 time = 0.0f;
-    };
+    using HitResult = physanim::HitResult;
+    using Hit = physanim::Hit;
+    using SurfaceMap = physanim::SurfaceMap;
 
     bool spawn(physics::PhysicsWorld& world, scene::Scene& scene, entt::entity entity, u32 collisionGroup);
     void step(f32 dt, physics::PhysicsWorld& world, const PlayInput& input, const scene::Scene& scene,
               const std::vector<std::pair<glm::vec3, glm::vec3>>& obstacles);
     // After each physics step: contacts of the blade (starts the hit reaction), hit statistics.
-    void afterStep(const physics::PhysicsWorld& world);
+    void afterStep(const physics::PhysicsWorld& world, const SurfaceMap& surfaces = {}, std::vector<physanim::HitEvent>* events = nullptr);
     // Writes the simulated pose into the entity's AnimatorComponent and Transform.
     void writePose(scene::Scene& scene, const physics::PhysicsWorld& world);
     void appendDebugLines(std::vector<renderer::DebugVertex>& out, const physics::PhysicsWorld& world, bool shapes) const;
@@ -57,8 +61,9 @@ public:
     [[nodiscard]] glm::vec3 rootPosition() const { return m_root; }
     [[nodiscard]] f32 yaw() const { return m_yaw; }
     [[nodiscard]] f32 speed() const { return m_speed; }
-    [[nodiscard]] const std::vector<Hit>& hits() const { return m_hits; }
+    [[nodiscard]] const std::vector<Hit>& hits() const { return m_tracker.hits(); }
     [[nodiscard]] physics::BodyId body(u32 joint) const { return m_bodies[joint]; }
+    [[nodiscard]] static const char* resultName(HitResult result) { return physanim::hitResultName(result); }
 
 private:
     void startAttack(physics::PhysicsWorld& world);
@@ -87,8 +92,7 @@ private:
     anim::AnimationPlayer m_attack;
     AttackPhase m_phase = AttackPhase::Swing;
     f32 m_phaseStart = 0.0f;
-    std::vector<Hit> m_hits;
-    bool m_inContact = false;
+    physanim::HitTracker m_tracker;
 
     mutable anim::Pose m_pose;
     mutable anim::Pose m_scratch;
@@ -96,7 +100,9 @@ private:
 };
 
 // Play mode of the editor: builds a physics world from the scene (colliders + characters), runs
-// it, drives the camera and restores the scene when stopped.
+// it, drives the camera and restores the scene when stopped. Actors with a
+// gameplay::CharacterControllerComponent (heroes) are moved by the engine's character controller
+// (their blend tree follows the speed, foot IK keeps the feet on the colliders).
 class PlayMode {
 public:
     PlayMode();
@@ -121,6 +127,16 @@ public:
     // For tests / tools.
     [[nodiscard]] const physics::PhysicsWorld& world() const { return *m_world; }
     [[nodiscard]] const std::vector<std::unique_ptr<PlayCharacter>>& characters() const { return m_characters; }
+    [[nodiscard]] const std::vector<entt::entity>& heroes() const { return m_heroes; }
+    // The physics body of `hero` (nullptr: none / not built yet).
+    [[nodiscard]] const physanim::PhysicalBody* heroBody(entt::entity hero) const;
+    // "On hit" events of the last update (weapons striking things), and the effects they started.
+    [[nodiscard]] const std::vector<physanim::HitEvent>& hitEvents() const { return m_hitEvents; }
+    [[nodiscard]] const vfx::VfxSystem& vfx() const { return m_vfx; }
+    // Effects played on hits (assets/vfx); without a library hits play none.
+    void setVfxLibrary(const vfx::VfxLibrary* library) { m_vfxLibrary = library; }
+    // The effect a hit plays: the struck collider's onHit, else "hit_<material>"; empty = none.
+    [[nodiscard]] std::string hitEffect(const physanim::HitEvent& hit) const;
 
 private:
     struct Snapshot {
@@ -130,10 +146,31 @@ private:
     bool m_active = false;
     std::unique_ptr<physics::PhysicsWorld> m_world;
     std::vector<std::unique_ptr<PlayCharacter>> m_characters;
+    PlayCharacter::SurfaceMap m_surfaces; // static colliders' materials
+    std::vector<entt::entity> m_heroes;
+    // HUD info about the first hero (filled by update).
+    f32 m_heroSpeed = 0.0f;
+    bool m_heroGrounded = true;
     std::vector<std::pair<glm::vec3, glm::vec3>> m_obstacles; // static collider AABBs (world)
     std::unordered_map<entt::entity, Snapshot> m_snapshot;
     entt::entity m_camera = entt::null;
     f32 m_accumulator = 0.0f;
+    f32 m_time = 0.0f; // simulated seconds since start
+    // Heroes' physics bodies (physics animation): the bones the leading clip marks as physical
+    // run on muscles (built on the first frame that has an animated pose).
+    struct HeroBody {
+        entt::entity hero = entt::null;
+        u32 group = 0;
+        bool failed = false;
+        physanim::PhysicalBody body;
+    };
+    std::vector<std::unique_ptr<HeroBody>> m_bodies;
+    void updateHeroBodies(scene::Scene& scene, f32 frameTime);
+    std::vector<physanim::HitEvent> m_hitEvents;
+    std::unordered_map<u32, entt::entity> m_bodyEntity; // static collider bodies -> entities
+    std::unordered_map<u32, std::string> m_bodyEffect;  // ... -> their onHit effect
+    vfx::VfxSystem m_vfx;
+    const vfx::VfxLibrary* m_vfxLibrary = nullptr;
     f32 m_stepHz = 960.0f;
 
     f32 m_cameraYaw = 0.0f;

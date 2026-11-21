@@ -1,5 +1,8 @@
 #include "kinetic/assets/MeshLoader.h"
 
+#include "LoaderInternal.h"
+
+#include "kinetic/assets/TextureLoader.h"
 #include "kinetic/core/Log.h"
 
 #include <ufbx.h>
@@ -90,9 +93,16 @@ std::optional<MeshData> loadMesh(const std::filesystem::path& path, std::string*
                 const f32 len = glm::length(n);
                 n = len > 1e-8f ? n / len : glm::vec3(0.0f, 1.0f, 0.0f);
 
+                glm::vec2 uv(0.0f);
+                if (mesh->vertex_uv.exists) {
+                    const ufbx_vec2 t = ufbx_get_vertex_vec2(&mesh->vertex_uv, corner);
+                    uv = glm::vec2(static_cast<f32>(t.x), 1.0f - static_cast<f32>(t.y)); // FBX v points up
+                }
+
                 out.indices.push_back(static_cast<u32>(out.positions.size()));
                 out.positions.push_back(toGlm(ufbx_transform_position(&toWorld, position)));
                 out.normals.push_back(n);
+                out.uvs.push_back(uv);
             }
         }
     }
@@ -100,6 +110,9 @@ std::optional<MeshData> loadMesh(const std::filesystem::path& path, std::string*
     if (out.empty()) {
         return fail("file contains no mesh geometry");
     }
+    out.material = detail::readFbxMaterial(*scene);
+    resolveMaterial(out.material, path);
+    computeTangents(out);
     KN_INFO("Mesh import '{}': {} triangles", path.filename().string(), out.triangleCount());
     return out;
 }

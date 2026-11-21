@@ -1,9 +1,13 @@
 #include "PlayMode.h"
 
+#include <kinetic/animation/Combat.h>
+
 #include "CharacterRig.h"
 
 #include <kinetic/animation/PoseOps.h>
+#include <kinetic/gameplay/CharacterController.h>
 #include <kinetic/scene/AnimatorComponent.h>
+#include <kinetic/scene/AnimatorSystem.h>
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -29,7 +33,6 @@ constexpr f32 kReflex = 0.05f;
 constexpr f32 kRecoverTime = 0.4f;
 constexpr f32 kHold = 0.3f;
 constexpr f32 kRecoveryClipTime = 1.15f;
-constexpr f32 kRestitution = 0.35f;
 
 f32 wrapAngle(f32 a)
 {
@@ -146,9 +149,11 @@ bool PlayCharacter::spawn(physics::PhysicsWorld& world, scene::Scene& scene, ent
         d.mass = part.mass;
         d.centerOfMass = part.centerOfMass;
         d.collisionGroup = collisionGroup;
-        d.friction = j == ch::kSword ? 0.4f : 0.7f;
-        d.restitution = j == ch::kSword ? kRestitution : 0.05f;
+        d.friction = j == ch::kSword ? 0.2f : 0.7f; // steel blade: sqrt(0.2 * 0.7) = 0.37 on stone
+        d.restitution = 0.05f; // low: Jolt takes the max, so the surface's material decides the bounce
         d.continuousCollision = j == ch::kSword;
+        d.sharp = j == ch::kSword; // the blade cuts into soft materials (wood is hard enough to stop it)
+        d.hardness = j == ch::kSword ? 1.0f : scene::surfaceProperties(scene::SurfaceMaterial::Flesh).hardness;
         m_bodies[j] = world.addBody(d);
     }
     const glm::vec3 sagittalAxis = rootRotation * ch::kSagittalAxis;
@@ -402,7 +407,7 @@ void PlayCharacter::step(f32 dt, physics::PhysicsWorld& world, const PlayInput& 
     }
 }
 
-void PlayCharacter::afterStep(const physics::PhysicsWorld& world)
+void PlayCharacter::afterStep(const physics::PhysicsWorld& world, const SurfaceMap& surfaces, std::vector<physanim::HitEvent>* events)
 {
     if (m_mode == Mode::Ragdoll) {
         // The root follows the pelvis on the ground.
@@ -412,31 +417,25 @@ void PlayCharacter::afterStep(const physics::PhysicsWorld& world)
         return;
     }
     if (m_mode != Mode::Attack) {
-        m_inContact = false;
+        m_tracker.reset();
         return;
     }
-    const physics::BodyState& sword = world.body(m_bodies[ch::kSword]);
-    const bool touching = sword.inContact && glm::length(sword.contactForce) > 1.0f;
-    if (touching && !m_inContact) {
-        m_hits.push_back(Hit{.time = m_time});
-        if (m_hits.size() > 16) {
-            m_hits.erase(m_hits.begin());
-        }
+    const physanim::HitTracker::Events e = m_tracker.update(world, m_bodies[ch::kSword], surfaces, m_time);
+    std::array<f32, 3> loads{};
+    for (usize i = 0; i < 3; ++i) {
+        const f32 strength = ch::parts()[kArmJoints[i]].muscle.maxTorque * m_strength;
+        loads[i] = std::abs(world.joint(m_joints[kArmJoints[i]]).muscleTorque) / strength;
     }
-    if (touching && m_phase == AttackPhase::Swing) {
-        m_phase = AttackPhase::Reflex; // the reaction starts at the impact
+    m_tracker.recordLoads(loads, m_time);
+    if (e.impact && events && !m_tracker.hits().empty()) {
+        const Hit& h = m_tracker.hits().back();
+        events->push_back({h.time, h.point, h.normal, h.velocityBefore, h.material, h.soft, h.targetBody, m_bodies[ch::kSword].index});
+    }
+    // The reflex comes once the hit is judged, like a real one (~tens of ms): a rebound / stop /
+    // stuck blade makes the arm react; a glance or a clean cut lets the swing go on.
+    if (e.judged && e.result != HitResult::Glance && e.result != HitResult::Cut && m_phase == AttackPhase::Swing) {
+        m_phase = AttackPhase::Reflex;
         m_phaseStart = m_time;
-    }
-    m_inContact = touching;
-    if (!m_hits.empty() && m_time - m_hits.back().time < 0.3f) {
-        Hit& hit = m_hits.back();
-        if (touching) {
-            hit.impulse += glm::length(sword.contactForce) * world.lastStep();
-        }
-        for (usize i = 0; i < 3; ++i) {
-            const f32 strength = ch::parts()[kArmJoints[i]].muscle.maxTorque * m_strength;
-            hit.peakLoad[i] = std::max(hit.peakLoad[i], std::abs(world.joint(m_joints[kArmJoints[i]]).muscleTorque) / strength);
-        }
     }
 }
 
@@ -536,7 +535,16 @@ void PlayMode::start(scene::Scene& scene, entt::entity camera)
 
     // Static colliders (floor, stones): physics bodies + AABBs for the character movement.
     m_obstacles.clear();
+    m_surfaces.clear();
+    m_bodyEntity.clear();
+    m_bodyEffect.clear();
+    m_hitEvents.clear();
+    m_vfx.clear();
+    m_vfx.setGround(0.0f);
     for (const entt::entity e : registry.view<scene::ColliderComponent, scene::TransformComponent>()) {
+        if (registry.all_of<gameplay::CharacterControllerComponent>(e)) {
+            continue; // moves with its character: not a static obstacle
+        }
         const auto& collider = registry.get<scene::ColliderComponent>(e);
         const auto& t = registry.get<scene::TransformComponent>(e);
         physics::BodyDesc d;
@@ -545,9 +553,14 @@ void PlayMode::start(scene::Scene& scene, entt::entity camera)
         d.position = t.position + t.rotation * (collider.offset * t.scale);
         d.rotation = t.rotation;
         d.motion = physics::MotionType::Static;
-        d.friction = 0.8f;
-        d.restitution = kRestitution;
-        m_world->addBody(d);
+        const scene::SurfaceProperties& surface = scene::surfaceProperties(collider.material);
+        d.friction = surface.friction;
+        d.restitution = surface.restitution;
+        d.hardness = surface.hardness;
+        const u32 body = m_world->addBody(d).index;
+        m_surfaces[body] = collider.material;
+        m_bodyEntity[body] = e;
+        if (!collider.onHit.empty()) m_bodyEffect[body] = collider.onHit;
 
         glm::vec3 lo(1e9f);
         glm::vec3 hi(-1e9f);
@@ -569,8 +582,32 @@ void PlayMode::start(scene::Scene& scene, entt::entity camera)
             m_characters.push_back(std::move(character));
         }
     }
+    m_heroes.clear();
+    for (const entt::entity e : registry.view<gameplay::CharacterControllerComponent>()) {
+        if (registry.all_of<scene::CharacterComponent>(e)) {
+            continue; // physics characters are driven above
+        }
+        auto& controller = registry.get<gameplay::CharacterControllerComponent>(e);
+        controller.velocity = glm::vec3(0.0f);
+        controller.initialized = false;
+        controller.grounded = true;
+        m_heroes.push_back(e);
+    }
+    m_bodies.clear();
+    m_time = 0.0f;
+    u32 bodyGroup = 1000;
+    for (const entt::entity e : m_heroes) {
+        if (!registry.all_of<scene::AnimatorComponent>(e)) continue;
+        auto body = std::make_unique<HeroBody>();
+        body->hero = e;
+        body->group = bodyGroup++;
+        m_bodies.push_back(std::move(body));
+    }
     if (!m_characters.empty()) {
         m_cameraYaw = m_characters.front()->yaw();
+    } else if (!m_heroes.empty()) {
+        const glm::vec3 forward = registry.get<scene::TransformComponent>(m_heroes.front()).rotation * glm::vec3(0, 0, 1);
+        m_cameraYaw = std::atan2(forward.x, forward.z);
     }
     m_accumulator = 0.0f;
     m_active = true;
@@ -595,52 +632,237 @@ void PlayMode::stop(scene::Scene& scene)
             }
         }
     }
+    for (const entt::entity e : m_heroes) {
+        if (!registry.valid(e)) {
+            continue;
+        }
+        if (auto* controller = registry.try_get<gameplay::CharacterControllerComponent>(e)) {
+            controller->velocity = glm::vec3(0.0f);
+            controller->initialized = false;
+        }
+        if (auto* animator = registry.try_get<scene::AnimatorComponent>(e); animator && animator->blendTree) {
+            animator->treeState.setParameter(*animator->blendTree, "speed", 0.0f);
+        }
+    }
+    for (const auto& body : m_bodies) {
+        if (registry.valid(body->hero)) {
+            if (auto* animator = registry.try_get<scene::AnimatorComponent>(body->hero)) {
+                physanim::PhysicalBody::clearOverrides(*animator);
+            }
+        }
+    }
+    m_bodies.clear();
+    m_vfx.clear();
+    m_hitEvents.clear();
+    m_heroes.clear();
     m_characters.clear();
     m_world.reset();
     m_snapshot.clear();
     m_active = false;
 }
 
+namespace {
+
+// The clip node leading the pose (highest weight): its physics bones are the simulated ones.
+const anim::BlendNode* leadingClip(const scene::AnimatorComponent& animator)
+{
+    if (!animator.blendTreeActive()) return nullptr;
+    const anim::BlendTree& tree = *animator.blendTree;
+    const anim::BlendNode* best = nullptr;
+    f32 bestWeight = 0.0f;
+    for (usize n = 0; n < tree.nodes.size() && n < animator.treeState.weight.size(); ++n) {
+        if (tree.nodes[n].type == anim::BlendNodeType::Clip && animator.treeState.weight[n] > bestWeight) {
+            bestWeight = animator.treeState.weight[n];
+            best = &tree.nodes[n];
+        }
+    }
+    return best;
+}
+
+std::string lowered(std::string s)
+{
+    std::ranges::transform(s, s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return s;
+}
+
+} // namespace
+
 void PlayMode::update(f32 dt, const PlayInput& input, scene::Scene& scene)
 {
     if (!m_active) {
         return;
     }
+    auto& registry = scene.registry();
+    const f32 frameTime = std::min(dt, 0.1f);
+
+    // 1. Heroes: the engine's character controller moves them (a knocked-down hero lies where its
+    //    body is instead).
+    const gameplay::CharacterInput heroInput{input.move, input.run, input.jump, input.attack, input.cameraYaw};
+    for (const entt::entity e : m_heroes) {
+        if (!registry.valid(e)) continue;
+        const physanim::PhysicalBody* body = heroBody(e);
+        if (body && body->phase() != physanim::PhysicalBody::Phase::Animated) {
+            if (body->down()) {
+                auto& t = registry.get<scene::TransformComponent>(e);
+                const glm::vec3 root = body->rootPosition(*m_world);
+                t.position.x = root.x;
+                t.position.z = root.z;
+            }
+            if (auto* c = registry.try_get<gameplay::CharacterControllerComponent>(e)) c->velocity = glm::vec3(0.0f);
+            continue;
+        }
+        if (input.playAttack >= 0) {
+            // Test shortcut: jump straight into attack N of the combo (no need to chain 1..N-1).
+            if (auto* animator = registry.try_get<scene::AnimatorComponent>(e); animator && animator->blendTreeActive()) {
+                const std::vector<i32> chain = anim::attackChain(*animator->blendTree);
+                if (static_cast<usize>(input.playAttack) < chain.size()) {
+                    animator->treeState.forceState(*animator->blendTree, chain[static_cast<usize>(input.playAttack)]);
+                }
+            }
+        }
+        gameplay::updateCharacter(scene, e, heroInput, frameTime);
+    }
+    if (!m_heroes.empty() && registry.valid(m_heroes.front())) {
+        const auto& c = registry.get<gameplay::CharacterControllerComponent>(m_heroes.front());
+        m_heroSpeed = gameplay::horizontalSpeed(c);
+        m_heroGrounded = c.grounded;
+    }
+
+    // 2. This frame's animation, so the physics follows the pose that is shown (no frame of lag
+    //    between the simulated bones and the rest of the body).
+    scene::evaluateAnimatorPoses(scene, frameTime);
+    updateHeroBodies(scene, frameTime);
+
+    // 3. Physics, in fixed steps.
+    m_hitEvents.clear();
     const f32 h = 1.0f / m_stepHz;
-    m_accumulator += std::min(dt, 0.1f);
+    m_accumulator += frameTime;
+    const int stepCount = std::min(static_cast<int>(m_accumulator / h), 200);
     PlayInput stepInput = input;
-    int steps = 0;
-    while (m_accumulator >= h && steps < 200) {
+    for (int steps = 0; steps < stepCount; ++steps) {
+        const f32 alpha = static_cast<f32>(steps + 1) / static_cast<f32>(stepCount);
         for (const auto& character : m_characters) {
             character->step(h, *m_world, stepInput, scene, m_obstacles);
         }
+        for (const auto& b : m_bodies) {
+            if (b->body.built()) b->body.step(*m_world, h, alpha, m_time);
+        }
         m_world->step(h);
+        m_time += h;
         for (const auto& character : m_characters) {
-            character->afterStep(*m_world);
+            character->afterStep(*m_world, m_surfaces, &m_hitEvents);
+        }
+        for (const auto& b : m_bodies) {
+            if (b->body.built()) b->body.afterStep(*m_world, m_surfaces, m_time, &m_hitEvents);
         }
         stepInput.attack = false; // edge-triggered: only the first step of the frame
         stepInput.toggleRagdoll = false;
         m_accumulator -= h;
-        ++steps;
+    }
+
+    // 4. The simulated bones go into the final pose (and the weapons attached to them).
+    for (const auto& b : m_bodies) {
+        if (!registry.valid(b->hero)) continue;
+        if (auto* animator = registry.try_get<scene::AnimatorComponent>(b->hero); animator && b->body.built()) {
+            b->body.writeOverrides(*m_world, registry.get<scene::TransformComponent>(b->hero).matrix(), *animator);
+        }
     }
     for (const auto& character : m_characters) {
         character->writePose(scene, *m_world);
     }
+    scene::finishAnimatorPoses(scene);
+    scene::updateAttachments(scene);
+
+    // 5. "On hit": effects where things were struck.
+    if (m_vfxLibrary) {
+        for (const physanim::HitEvent& hit : m_hitEvents) {
+            const std::string effect = hitEffect(hit);
+            if (const vfx::VfxDesc* desc = effect.empty() ? nullptr : m_vfxLibrary->find(effect)) {
+                m_vfx.spawn(*desc, hit.point, hit.normal, hit.velocity, glm::length(hit.velocity) / 12.0f);
+            }
+        }
+    }
+    m_vfx.update(frameTime);
+}
+
+std::string PlayMode::hitEffect(const physanim::HitEvent& hit) const
+{
+    if (const auto it = m_bodyEffect.find(hit.targetBody); it != m_bodyEffect.end()) {
+        return it->second == "none" ? std::string() : it->second;
+    }
+    return "hit_" + lowered(scene::surfaceProperties(hit.material).name);
+}
+
+void PlayMode::updateHeroBodies(scene::Scene& scene, f32 frameTime)
+{
+    auto& registry = scene.registry();
+    for (const auto& b : m_bodies) {
+        if (b->failed || !registry.valid(b->hero)) {
+            continue;
+        }
+        const auto* animator = registry.try_get<scene::AnimatorComponent>(b->hero);
+        const auto* transform = registry.try_get<scene::TransformComponent>(b->hero);
+        if (!animator || !animator->model || !transform) {
+            continue;
+        }
+        const usize joints = animator->model->skeleton.jointCount();
+        if (animator->animatedModel.size() != joints) {
+            continue; // not animated yet
+        }
+        const glm::mat4 world = transform->matrix();
+        if (!b->body.built()) {
+            std::vector<physanim::WeaponMount> weapons;
+            for (const entt::entity e : registry.view<scene::AttachmentComponent, scene::WeaponComponent>()) {
+                const auto& a = registry.get<scene::AttachmentComponent>(e);
+                if (a.parent == b->hero && a.joint >= 0) weapons.push_back({a.joint, a.offset, registry.get<scene::WeaponComponent>(e)});
+            }
+            const auto* name = registry.try_get<scene::NameComponent>(b->hero);
+            if (!b->body.build(*m_world, *animator->model, animator->animatedModel, world, weapons, name ? name->name : "Hero", b->group)) {
+                b->failed = true;
+                continue;
+            }
+        }
+        const anim::BlendNode* lead = leadingClip(*animator);
+        static const std::vector<i32> kNone;
+        b->body.setTargets(world, animator->animatedModel, frameTime, lead ? lead->physicsJoints : kNone,
+                           lead ? lead->physicsStrength : 1.0f);
+    }
+}
+
+const physanim::PhysicalBody* PlayMode::heroBody(entt::entity hero) const
+{
+    for (const auto& b : m_bodies) {
+        if (b->hero == hero && b->body.built()) return &b->body;
+    }
+    return nullptr;
 }
 
 void PlayMode::updateCamera(scene::Scene& scene, const glm::vec2& orbitDelta, f32 wheel)
 {
-    if (!m_active || m_camera == entt::null || !scene.registry().valid(m_camera) || m_characters.empty()) {
+    const bool hero = m_characters.empty() && !m_heroes.empty() && scene.registry().valid(m_heroes.front());
+    if (!m_active || m_camera == entt::null || !scene.registry().valid(m_camera) || (m_characters.empty() && !hero)) {
         return;
     }
     m_cameraYaw -= orbitDelta.x * 0.006f;
     m_cameraPitch = std::clamp(m_cameraPitch + orbitDelta.y * 0.006f, -0.4f, 1.3f);
     m_cameraDistance = std::clamp(m_cameraDistance * std::pow(0.9f, wheel), 1.2f, 15.0f);
 
-    const PlayCharacter& c = *m_characters.front();
-    glm::vec3 target = c.rootPosition() + glm::vec3(0.0f, 1.4f, 0.0f);
-    if (c.mode() == PlayCharacter::Mode::Ragdoll) {
-        target = m_world->body(c.body(character::kPelvis)).position + glm::vec3(0.0f, 0.3f, 0.0f);
+    glm::vec3 target(0.0f);
+    if (hero) {
+        const entt::entity e = m_heroes.front();
+        const f32 height = scene.registry().get<gameplay::CharacterControllerComponent>(e).height;
+        target = scene.registry().get<scene::TransformComponent>(e).position + glm::vec3(0.0f, height * 0.8f, 0.0f);
+    } else {
+        const PlayCharacter& c = *m_characters.front();
+        target = c.rootPosition() + glm::vec3(0.0f, 1.4f, 0.0f);
+        if (m_characters.size() > 1) {
+            // Several characters (they all take the same input): look at the middle of the group.
+            glm::vec3 sum(0.0f);
+            for (const auto& other : m_characters) sum += other->rootPosition();
+            target = sum / static_cast<f32>(m_characters.size()) + glm::vec3(0.0f, 1.0f, 0.0f);
+        } else if (c.mode() == PlayCharacter::Mode::Ragdoll) {
+            target = m_world->body(c.body(character::kPelvis)).position + glm::vec3(0.0f, 0.3f, 0.0f);
+        }
     }
     const glm::vec3 look(std::sin(m_cameraYaw) * std::cos(m_cameraPitch), -std::sin(m_cameraPitch),
                          std::cos(m_cameraYaw) * std::cos(m_cameraPitch));
@@ -657,7 +879,54 @@ void PlayMode::appendDebugLines(std::vector<renderer::DebugVertex>& out) const
     for (const auto& character : m_characters) {
         character->appendDebugLines(out, *m_world, showShapes);
     }
+    for (const auto& hb : m_bodies) {
+        const physanim::PhysicalBody& body = hb->body;
+        if (!body.built() || (!body.simulated() && !showShapes)) {
+            continue;
+        }
+        // Bodies: simulated ones coloured by the load of their muscle, the rest blue (with
+        // "Show shapes"); the blade orange, its contact force red.
+        for (usize i = 0; i < body.segmentCount(); ++i) {
+            if (!body.segmentDynamic(i) && !showShapes) continue;
+            const glm::vec3 a0 = m_world->body(body.segmentBody(i)).position;
+            line(out, a0, body.segmentEnd(*m_world, i), body.segmentDynamic(i) ? loadColor(body.load(*m_world, i)) : glm::vec3(0.5f, 0.7f, 1.0f));
+        }
+        for (usize k = 0; k < body.weaponCount(); ++k) {
+            const physics::BodyState& w = m_world->body(body.weapon(k));
+            const auto& wd = m_world->bodyDesc(body.weapon(k));
+            const bool dynamic = wd.motion == physics::MotionType::Dynamic;
+            if (!dynamic && !showShapes) continue;
+            const glm::vec3 tip = w.position + w.rotation * (wd.shape.offset + glm::vec3(0.0f, wd.shape.halfExtents.y, 0.0f));
+            line(out, w.position, tip, dynamic ? glm::vec3(1.0f, 0.6f, 0.2f) : glm::vec3(0.5f, 0.7f, 1.0f));
+            if (w.inContact) {
+                arrow(out, w.contactPoint, w.contactForce * 0.0015f, {1.0f, 0.2f, 0.2f});
+            }
+        }
+    }
 }
+
+namespace {
+
+// Hit log: newest first.
+void appendHitLines(std::vector<std::string>& lines, const std::vector<physanim::Hit>& hits)
+{
+    if (hits.empty()) {
+        return;
+    }
+    lines.emplace_back("hits   material   result    speed     angle   impulse   cut     muscle load (shoulder/elbow/wrist)");
+    char text[200];
+    for (usize k = 0; k < std::min<usize>(hits.size(), 6); ++k) {
+        const auto& hit = hits[hits.size() - 1 - k];
+        std::snprintf(text, sizeof(text), "       %-8s   %-7s  %4.1f m/s   %3.0f deg  %5.2f N s  %4.1f cm  %3.0f / %3.0f / %3.0f %%",
+                      scene::surfaceProperties(hit.material).name, physanim::hitResultName(hit.result),
+                      static_cast<double>(hit.speed), static_cast<double>(hit.angle), static_cast<double>(hit.impulse),
+                      static_cast<double>(hit.depth * 100.0f), static_cast<double>(hit.peakLoad[0] * 100.0f),
+                      static_cast<double>(hit.peakLoad[1] * 100.0f), static_cast<double>(hit.peakLoad[2] * 100.0f));
+        lines.emplace_back(text);
+    }
+}
+
+} // namespace
 
 void PlayMode::drawHud(ImDrawList* draw, const ImVec2& p0, const ImVec2& /*size*/) const
 {
@@ -665,9 +934,33 @@ void PlayMode::drawHud(ImDrawList* draw, const ImVec2& p0, const ImVec2& /*size*
         return;
     }
     std::vector<std::string> lines;
-    lines.emplace_back("PLAY   WASD move   Shift run   LMB attack (physics)   R ragdoll   RMB drag camera   Esc stop");
-    if (m_characters.empty()) {
-        lines.emplace_back("No character in the scene: drop the Character preset from Assets (and a Floor).");
+    lines.emplace_back(m_characters.empty() && !m_heroes.empty()
+                            ? "PLAY   WASD move   Shift run   Space jump   LMB attack (combo)   1-9 attack N   RMB drag camera   Esc stop"
+                            : "PLAY   WASD move   Shift run   LMB attack (physics)   R ragdoll   RMB drag camera   Esc stop");
+    if (m_characters.empty() && !m_heroes.empty()) {
+        char text[160];
+        std::snprintf(text, sizeof(text), "hero: %s   speed %.2f m/s   (blend tree + foot IK)",
+                      m_heroGrounded ? "on the ground" : "falling", static_cast<double>(m_heroSpeed));
+        lines.emplace_back(text);
+        if (const physanim::PhysicalBody* body = heroBody(m_heroes.front())) {
+            usize simulated = 0;
+            for (usize i = 0; i < body->segmentCount(); ++i) simulated += body->segmentDynamic(i) ? 1 : 0;
+            using P = physanim::PhysicalBody::Phase;
+            if (body->phase() == P::Down) {
+                std::snprintf(text, sizeof(text), "physics body: KNOCKED DOWN (ragdoll)");
+            } else if (body->phase() == P::GettingUp) {
+                std::snprintf(text, sizeof(text), "physics body: getting up");
+            } else if (simulated > 0) {
+                std::snprintf(text, sizeof(text), "physics body: %zu of %zu bones on muscles", simulated, body->segmentCount());
+            } else {
+                std::snprintf(text, sizeof(text), "physics body: animation (this clip has no physics bones)");
+            }
+            lines.emplace_back(text);
+            if (body->weaponCount() > 0) appendHitLines(lines, body->hits());
+        }
+    } else if (m_characters.empty()) {
+        lines.emplace_back("No character in the scene: drop the Character preset from Assets (and a Floor), or select an "
+                           "animated actor and click Make Playable Hero.");
     } else {
         const PlayCharacter& c = *m_characters.front();
         const char* mode = c.mode() == PlayCharacter::Mode::Locomotion ? "walking (regular animation)"
@@ -683,13 +976,7 @@ void PlayMode::drawHud(ImDrawList* draw, const ImVec2& p0, const ImVec2& /*size*
             std::snprintf(text, sizeof(text), "attack phase: %s", phase);
             lines.emplace_back(text);
         }
-        if (!c.hits().empty()) {
-            const auto& hit = c.hits().back();
-            std::snprintf(text, sizeof(text), "last hit: %.2f N s   muscle load  shoulder %.0f%%  elbow %.0f%%  wrist %.0f%%",
-                          static_cast<double>(hit.impulse), static_cast<double>(hit.peakLoad[0] * 100.0f),
-                          static_cast<double>(hit.peakLoad[1] * 100.0f), static_cast<double>(hit.peakLoad[2] * 100.0f));
-            lines.emplace_back(text);
-        }
+        appendHitLines(lines, c.hits());
     }
     const f32 lineHeight = ImGui::GetTextLineHeightWithSpacing();
     f32 width = 0.0f;

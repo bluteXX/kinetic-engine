@@ -25,7 +25,18 @@ Milestone 3 — animation (in progress):
 - [x] `AnimationPlayer`: play / pause / loop / speed (incl. reverse) / crossfade between clips
 - [x] Editor *Animation* panel: clips, transport, timeline with keyframes + scrubbing, skeleton
       overlay, bind pose, joint hierarchy
-- [ ] GPU skinning (needs the Vulkan SDK for shader compilation)
+- [x] Materials: base colour + normal map textures (PNG), texture sets found next to the model
+- [x] Animation graph: state machine (Float / Bool / Trigger parameters, conditions, exit time,
+      crossfades) over blend trees (Clip / Blend1D / Blend2D, synced cycles); Unity-style graph
+      editor in the Actor Editor (double-click an actor)
+- [x] Clip processing: centred root, loop pose, sub-clips, root yaw / root motion extraction, mirroring
+- [x] Animation retargeting by bone name (Mixamo clips without skin onto any Mixamo-named rig)
+- [x] Dark-Souls-style melee combo: input buffer, combo windows after the strike, committed
+      attacks with root motion, recovery cancel, combat idle
+- [x] Foot IK (two-bone legs, pelvis drop, foot alignment) on any rig with *Foot / *Ankle joints
+- [x] Character controller (`gameplay` module) + *Make Playable Hero*: any humanoid with idle /
+      walk / run clips (e.g. a Tripo3D / Mixamo export) walks and runs in Play mode
+- [ ] GPU skinning
 
 Milestone 4 — physics-driven animation (in progress):
 
@@ -41,7 +52,7 @@ See the [roadmap](#roadmap) for what comes next.
 
 ## Building
 
-Requirements: **CMake ≥ 3.25**, **Ninja**, and a C++20 compiler —
+Requirements: **CMake ≥ 3.26**, **Ninja**, and a C++20 compiler —
 Xcode command line tools on macOS, Visual Studio 2022 (MSVC) on Windows.
 On Windows you also need a GPU driver with Vulkan support (any recent NVIDIA / AMD / Intel driver).
 

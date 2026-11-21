@@ -1,5 +1,9 @@
 #include "AnimationEditor.h"
 
+#include "CharacterSetup.h"
+#include "ComponentGizmos.h"
+
+#include <kinetic/gameplay/CharacterController.h>
 #include <kinetic/renderer/AnimationSystem.h>
 
 #include <imgui.h>
@@ -27,100 +31,186 @@ void tooltip(const char* text)
     }
 }
 
+const char* componentName(ComponentKind kind)
+{
+    switch (kind) {
+    case ComponentKind::MeshRenderer: return "Mesh Renderer";
+    case ComponentKind::Animator: return "Animator";
+    case ComponentKind::CharacterController: return "Character Controller";
+    case ComponentKind::Collider: return "Box Collider";
+    case ComponentKind::PhysicsCharacter: return "Character (physics)";
+    }
+    return "?";
+}
+
 } // namespace
 
-void AnimationEditor::open(entt::entity actor)
+void AnimationEditor::open(entt::entity actor, std::optional<Tab> tab)
 {
     if (actor != m_actor) {
         m_joint = -1;
-        m_framedModel = nullptr; // re-frame the camera on the new model
+        m_item = GraphItem::None;
+        m_itemIndex = -1;
+        m_linkFrom = -2;
+        m_framedFor = nullptr; // re-frame the camera on the new actor
+        m_pan = glm::vec2(0.0f);
+        m_zoom = 1.0f;
+    }
+    if (tab) {
+        m_tab = *tab;
+        m_selectTab = true;
     }
     m_actor = actor;
     m_open = true;
-    ImGui::SetWindowFocus("###AnimationEditor");
+    ImGui::SetWindowFocus("###ActorEditor");
 }
 
-void AnimationEditor::draw(scene::Scene& scene, renderer::Renderer& renderer)
+void AnimationEditor::draw(scene::Scene& scene, renderer::Renderer& renderer, ActorEditorHost& host)
 {
     m_targetVisible = false;
     if (!m_open) {
         return;
     }
     auto& registry = scene.registry();
-    auto* animator = registry.valid(m_actor) ? registry.try_get<scene::AnimatorComponent>(m_actor) : nullptr;
-    const char* actorName = registry.valid(m_actor) ? registry.get<scene::NameComponent>(m_actor).name.c_str() : "";
+    const bool valid = registry.valid(m_actor);
+    const char* actorName = valid ? registry.get<scene::NameComponent>(m_actor).name.c_str() : "";
 
     char title[160];
-    std::snprintf(title, sizeof(title), "Animation Editor - %s###AnimationEditor", actorName);
-    ImGui::SetNextWindowSize(ImVec2(1100.0f, 680.0f), ImGuiCond_FirstUseEver);
+    std::snprintf(title, sizeof(title), "Actor Editor - %s###ActorEditor", actorName);
+    // Never larger than the editor's window, and kept inside it (a saved layout from a bigger
+    // screen would otherwise hide the bottom of the window - and its resize corner - off screen).
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const ImVec2 work = viewport->WorkSize;
+    ImGui::SetNextWindowSizeConstraints(ImVec2(std::min(640.0f, work.x), std::min(420.0f, work.y)), work);
+    ImGui::SetNextWindowSize(ImVec2(std::min(1280.0f, work.x * 0.92f), std::min(780.0f, work.y * 0.9f)), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + work.x * 0.5f, viewport->WorkPos.y + work.y * 0.5f), ImGuiCond_FirstUseEver,
+                            ImVec2(0.5f, 0.5f));
+    m_focused = false;
     if (!ImGui::Begin(title, &m_open, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
         ImGui::End();
         return;
     }
-    if (!animator || !animator->model) {
+    if (!ImGui::IsWindowDocked()) {
+        const ImVec2 pos = ImGui::GetWindowPos();
+        const ImVec2 size = ImGui::GetWindowSize();
+        ImVec2 fitted = pos;
+        fitted.x = std::clamp(pos.x, viewport->WorkPos.x, std::max(viewport->WorkPos.x, viewport->WorkPos.x + work.x - size.x));
+        fitted.y = std::clamp(pos.y, viewport->WorkPos.y, std::max(viewport->WorkPos.y, viewport->WorkPos.y + work.y - size.y));
+        if (fitted.x != pos.x || fitted.y != pos.y) {
+            ImGui::SetWindowPos(fitted);
+        }
+    }
+    m_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    if (!valid) {
         ImGui::Spacing();
-        ImGui::TextDisabled("This actor has no Animator any more.");
-        ImGui::TextDisabled("Select an animated actor and click \"Edit Animation...\" in the Inspector.");
+        ImGui::TextDisabled("This actor no longer exists. Double-click an actor in the Viewport or the Hierarchy.");
         ImGui::End();
         return;
     }
-    syncPreview(scene, *animator);
+    auto* animator = registry.try_get<scene::AnimatorComponent>(m_actor);
+    if (animator && !animator->model) {
+        animator = nullptr;
+    }
+    syncPreview(scene, renderer);
 
     if (ImGui::BeginTable("##layout", 2, ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV)) {
-        ImGui::TableSetupColumn("side", ImGuiTableColumnFlags_WidthFixed, 240.0f);
-        ImGui::TableSetupColumn("main", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("left", ImGuiTableColumnFlags_WidthStretch, 0.38f);
+        ImGui::TableSetupColumn("right", ImGuiTableColumnFlags_WidthStretch, 0.62f);
         ImGui::TableNextRow();
 
+        // Left: preview over the components.
         ImGui::TableSetColumnIndex(0);
-        const f32 sideHeight = ImGui::GetContentRegionAvail().y;
-        ImGui::BeginChild("##clips", ImVec2(0, sideHeight * 0.4f), ImGuiChildFlags_None);
-        drawClipList(*animator);
+        const f32 leftHeight = ImGui::GetContentRegionAvail().y;
+        ImGui::BeginChild("##preview", ImVec2(0, leftHeight * 0.52f), ImGuiChildFlags_None,
+                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        drawPreview(renderer, animator);
         ImGui::EndChild();
-        ImGui::BeginChild("##skeleton", ImVec2(0, 0), ImGuiChildFlags_None);
-        drawSkeleton(*animator);
+        ImGui::BeginChild("##components", ImVec2(0, 0), ImGuiChildFlags_None);
+        drawComponents(scene, host);
         ImGui::EndChild();
 
+        // Right: graph / clips / skeleton.
         ImGui::TableSetColumnIndex(1);
-        constexpr f32 kBottom = 118.0f; // transport + timeline + status line
-        const f32 previewHeight = std::max(ImGui::GetContentRegionAvail().y - kBottom, 80.0f);
-        ImGui::BeginChild("##preview", ImVec2(0, previewHeight), ImGuiChildFlags_None,
-                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        drawPreview(renderer, *animator);
+        ImGui::BeginChild("##right", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
+        animator = registry.try_get<scene::AnimatorComponent>(m_actor); // the components panel may have changed it
+        if (!animator || !animator->model) {
+            ImGui::Spacing();
+            ImGui::TextDisabled("No Animator: add one in Components (the actor's mesh must be an animated asset).");
+        } else if (ImGui::BeginTabBar("##rightTabs")) {
+            const auto flags = [&](Tab t) {
+                return m_selectTab && m_tab == t ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
+            };
+            if (ImGui::BeginTabItem("Animation Graph", nullptr, flags(Tab::Graph))) {
+                if (!m_selectTab) m_tab = Tab::Graph;
+                drawGraphTab(scene, *animator);
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Clips & Timeline", nullptr, flags(Tab::Clips))) {
+                if (!m_selectTab) m_tab = Tab::Clips;
+                drawClipsTab(scene, *animator);
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Skeleton", nullptr, flags(Tab::Skeleton))) {
+                if (!m_selectTab) m_tab = Tab::Skeleton;
+                drawSkeleton(*animator);
+                ImGui::EndTabItem();
+            }
+            m_selectTab = false;
+            ImGui::EndTabBar();
+        }
         ImGui::EndChild();
-        drawTransport(*animator);
-        drawTimeline(*animator);
         ImGui::EndTable();
     }
     ImGui::End();
 }
 
-void AnimationEditor::syncPreview(const scene::Scene& scene, const scene::AnimatorComponent& animator)
+// ---------------------------------------------------------------------------------------------- //
+// Preview
+
+void AnimationEditor::syncPreview(const scene::Scene& scene, const renderer::Renderer& renderer)
 {
     if (m_previewCamera == entt::null) {
         m_previewCamera = m_preview.createCamera("Preview Camera", {0.0f, 1.0f, 3.0f}, {0.0f, 1.0f, 0.0f});
         m_previewActor = m_preview.createMesh("Preview", scene::kTriangleMesh, glm::vec4(1.0f));
     }
-    const anim::SkinnedModel& model = *animator.model;
-    if (m_framedModel != &model) {
-        frameModel(model);
+    const auto& registry = scene.registry();
+    auto& mesh = m_preview.registry().get<scene::MeshRendererComponent>(m_previewActor);
+    const auto* source = registry.try_get<scene::MeshRendererComponent>(m_actor);
+    if (!source) {
+        mesh.visible = false;
+        return;
+    }
+    // Bounds: the animated model's rest pose, or the static mesh (both in model units: the preview
+    // shows the model unscaled).
+    const void* framedFor = nullptr;
+    if (const auto* animator = registry.try_get<scene::AnimatorComponent>(m_actor); animator && animator->model) {
+        m_boundsMin = animator->model->restBoundsMin;
+        m_boundsMax = animator->model->restBoundsMax;
+        framedFor = animator->model.get();
+    } else if (const renderer::GpuMesh* gpu = renderer.mesh(source->mesh)) {
+        m_boundsMin = gpu->boundsMin;
+        m_boundsMax = gpu->boundsMax;
+        framedFor = gpu;
+    }
+    if (framedFor && m_framedFor != framedFor) {
+        m_framedFor = framedFor;
+        m_keyTimes.clear(); // clip addresses may have changed
+        frame(m_boundsMin, m_boundsMax);
     }
 
-    // The preview actor shows the edited actor's instance mesh (skinned by the animation system),
-    // standing on the preview's floor at the origin.
-    const auto& source = scene.registry().get<scene::MeshRendererComponent>(m_actor);
-    auto& mesh = m_preview.registry().get<scene::MeshRendererComponent>(m_previewActor);
-    mesh.mesh = source.mesh;
-    mesh.tint = source.tint;
+    // The preview actor shows the edited actor's mesh (animated: its skinned instance), with its
+    // material, standing on the preview's floor at the origin.
+    mesh = *source;
     mesh.visible = m_showMesh;
-    const glm::vec3 center = (model.restBoundsMin + model.restBoundsMax) * 0.5f;
-    m_preview.registry().get<scene::TransformComponent>(m_previewActor).position =
-        -glm::vec3(center.x, model.restBoundsMin.y, center.z);
+    auto& transform = m_preview.registry().get<scene::TransformComponent>(m_previewActor);
+    transform.scale = glm::vec3(1.0f);
+    const glm::vec3 center = (m_boundsMin + m_boundsMax) * 0.5f;
+    transform.position = -glm::vec3(center.x, m_boundsMin.y, center.z);
 }
 
-void AnimationEditor::frameModel(const anim::SkinnedModel& model)
+void AnimationEditor::frame(const glm::vec3& boundsMin, const glm::vec3& boundsMax)
 {
-    m_framedModel = &model;
-    const glm::vec3 size = model.restBoundsMax - model.restBoundsMin;
+    const glm::vec3 size = boundsMax - boundsMin;
     const f32 radius = std::max(glm::length(size) * 0.5f, 0.1f);
     m_orbitTarget = glm::vec3(0.0f, size.y * 0.5f, 0.0f);
     m_distance = radius / std::sin(glm::radians(60.0f) * 0.5f) * 1.05f;
@@ -139,7 +229,7 @@ void AnimationEditor::updateOrbitCamera()
     camera.farPlane = std::max(m_distance * 50.0f, 50.0f);
 }
 
-void AnimationEditor::drawPreview(renderer::Renderer& renderer, scene::AnimatorComponent& animator)
+void AnimationEditor::drawPreview(renderer::Renderer& renderer, scene::AnimatorComponent* animator)
 {
     const ImVec2 size = ImGui::GetContentRegionAvail();
     if (size.x < 1.0f || size.y < 1.0f) {
@@ -182,17 +272,22 @@ void AnimationEditor::drawPreview(renderer::Renderer& renderer, scene::AnimatorC
     ImGui::SetCursorScreenPos(ImVec2(p0.x + 8.0f, p0.y + 6.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 2.0f));
     ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(20, 22, 26, 200));
-    ImGui::Checkbox("Skeleton", &m_showSkeleton);
-    ImGui::SameLine();
     ImGui::Checkbox("Mesh", &m_showMesh);
     ImGui::SameLine();
     ImGui::Checkbox("Grid", &m_showGrid);
     ImGui::SameLine();
-    ImGui::Checkbox("Bind pose", &animator.bindPose);
-    tooltip("Show the skeleton's rest pose instead of the animation");
+    ImGui::Checkbox("Gizmos", &m_showGizmos);
+    tooltip("Show the components: collider box, character controller capsule");
+    if (animator) {
+        ImGui::SameLine();
+        ImGui::Checkbox("Skeleton", &m_showSkeleton);
+        ImGui::SameLine();
+        ImGui::Checkbox("Bind pose", &animator->bindPose);
+        tooltip("Show the skeleton's rest pose instead of the animation");
+    }
     ImGui::SameLine();
     if (ImGui::SmallButton("Frame")) {
-        frameModel(*animator.model);
+        frame(m_boundsMin, m_boundsMax);
     }
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
@@ -205,10 +300,16 @@ void AnimationEditor::updateOverlay(const scene::Scene& scene, renderer::Rendere
 {
     std::vector<renderer::DebugVertex> lines;
     const auto& registry = scene.registry();
-    if (m_open && m_showSkeleton && m_previewActor != entt::null && registry.valid(m_actor)) {
-        if (const auto* animator = registry.try_get<scene::AnimatorComponent>(m_actor)) {
-            const glm::mat4 world = m_preview.registry().get<scene::TransformComponent>(m_previewActor).matrix();
+    if (m_open && m_previewActor != entt::null && registry.valid(m_actor)) {
+        const glm::mat4 world = m_preview.registry().get<scene::TransformComponent>(m_previewActor).matrix();
+        if (const auto* animator = registry.try_get<scene::AnimatorComponent>(m_actor); animator && m_showSkeleton) {
             renderer::appendSkeletonLines(*animator, world, lines, m_joint);
+        }
+        if (m_showGizmos) {
+            GizmoOptions options;
+            options.footIK = false; // foot IK targets live in the scene, not in the preview
+            options.highlight = true;
+            appendComponentGizmos(scene, m_actor, world, lines, options);
         }
     }
     renderer.setOverlayLines(std::move(lines), kOverlayLayer);
@@ -228,21 +329,122 @@ void AnimationEditor::renderPreview(gfx::Frame& frame, renderer::Renderer& rende
     renderer.endPass(pass);
 }
 
-void AnimationEditor::shutdown(renderer::Renderer& renderer)
+void AnimationEditor::shutdown(renderer::Renderer& renderer) { renderer.releaseTarget(m_target); }
+
+// ---------------------------------------------------------------------------------------------- //
+// Components
+
+void AnimationEditor::drawComponents(scene::Scene& scene, ActorEditorHost& host)
 {
-    renderer.releaseTarget(m_target);
+    const auto& registry = scene.registry();
+    std::vector<ComponentKind> present;
+    if (registry.all_of<scene::MeshRendererComponent>(m_actor)) present.push_back(ComponentKind::MeshRenderer);
+    if (registry.all_of<scene::AnimatorComponent>(m_actor)) present.push_back(ComponentKind::Animator);
+    if (registry.all_of<scene::CharacterComponent>(m_actor)) present.push_back(ComponentKind::PhysicsCharacter);
+    if (registry.all_of<scene::ColliderComponent>(m_actor)) present.push_back(ComponentKind::Collider);
+    if (registry.all_of<gameplay::CharacterControllerComponent>(m_actor)) present.push_back(ComponentKind::CharacterController);
+    std::ranges::sort(present);
+    if (!present.empty() && std::ranges::find(present, m_component) == present.end()) {
+        m_component = present.front();
+    }
+
+    ImGui::SeparatorText("Components");
+    ImGui::BeginChild("##componentList", ImVec2(0, ImGui::GetFrameHeightWithSpacing() * (static_cast<f32>(present.size()) + 0.4f)),
+                      ImGuiChildFlags_None);
+    std::optional<ComponentKind> remove;
+    for (const ComponentKind kind : present) {
+        ImGui::PushID(static_cast<int>(kind));
+        if (ImGui::Selectable(componentName(kind), m_component == kind, ImGuiSelectableFlags_AllowOverlap)) {
+            m_component = kind;
+        }
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - 18.0f);
+        if (ImGui::SmallButton("x")) {
+            remove = kind;
+        }
+        tooltip("Remove component");
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    if (remove) {
+        host.removeComponent(m_actor, *remove);
+    }
+    if (ImGui::Button("+ Add Component", ImVec2(-FLT_MIN, 0))) {
+        ImGui::OpenPopup("##addComponent");
+    }
+    if (ImGui::BeginPopup("##addComponent")) {
+        host.drawAddComponentMenu(m_actor);
+        ImGui::EndPopup();
+    }
+
+    if (!present.empty() && !remove) {
+        ImGui::SeparatorText(componentName(m_component));
+        host.drawComponentDetails(m_actor, m_component);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------- //
+// Clips & timeline
+
+void AnimationEditor::drawClipsTab(scene::Scene& scene, scene::AnimatorComponent& animator)
+{
+    if (animator.blendTreeActive()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.4f, 1.0f), "The animation graph is playing.");
+        ImGui::SameLine();
+        ImGui::TextDisabled("Clicking a clip plays it alone (graph off).");
+    }
+    if (ImGui::BeginTable("##clipsLayout", 2, ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV)) {
+        ImGui::TableSetupColumn("list", ImGuiTableColumnFlags_WidthFixed, 230.0f);
+        ImGui::TableSetupColumn("timeline", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        drawClipList(animator);
+        ImGui::TableSetColumnIndex(1);
+        drawTransport(animator);
+        drawBladeEdge(scene, animator);
+        drawTimeline(animator);
+        ImGui::EndTable();
+    }
+}
+
+void AnimationEditor::drawBladeEdge(scene::Scene& scene, scene::AnimatorComponent& animator)
+{
+    const i32 clip = animator.player.clip();
+    const auto clips = animator.clips();
+    if (clip < 0 || static_cast<usize>(clip) >= clips.size()) return;
+    bool armed = false;
+    for (const entt::entity e : scene.registry().view<scene::AttachmentComponent, scene::WeaponComponent>()) {
+        armed |= scene.registry().get<scene::AttachmentComponent>(e).parent == m_actor;
+    }
+    if (!armed) return;
+    if (clips[static_cast<usize>(clip)].edgeAligned()) {
+        ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f), "Blade edge aligned");
+        tooltip("The hand turns about the blade so the sword cuts through the air edge first (saved with the actor)");
+    } else if (ImGui::SmallButton("Align blade edge")) {
+        if (const auto r = alignWeaponEdge(scene, m_actor, clip)) {
+            char text[160];
+            std::snprintf(text, sizeof(text), "blade off its edge %.0f -> %.0f deg (hand turned up to %.0f deg)",
+                          static_cast<double>(r->before), static_cast<double>(r->after), static_cast<double>(r->maxTwist));
+            m_edgeMessage = text;
+        }
+    } else {
+        tooltip("Attacks animated without a weapon often swing the blade flat. This turns the hand about the blade\n"
+                "(only while it moves fast) so an edge leads, like a real cut. Changes this clip for this actor.");
+    }
+    if (!m_edgeMessage.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", m_edgeMessage.c_str());
+    }
 }
 
 void AnimationEditor::drawClipList(scene::AnimatorComponent& animator)
 {
     const anim::SkinnedModel& model = *animator.model;
-    ImGui::SeparatorText("Clips");
     if (model.clips.empty()) {
         ImGui::TextDisabled("(no clips in this file)");
     }
     for (usize i = 0; i < model.clips.size(); ++i) {
         const anim::AnimationClip& clip = model.clips[i];
-        const bool current = animator.player.clip() == static_cast<i32>(i);
+        const bool current = animator.player.clip() == static_cast<i32>(i) && !animator.blendTreeActive();
         const bool physics = clip.kind() == anim::ClipKind::Physics;
         ImGui::PushID(static_cast<int>(i));
         if (physics) {
@@ -250,13 +452,18 @@ void AnimationEditor::drawClipList(scene::AnimatorComponent& animator)
         }
         if (ImGui::Selectable(clip.name().c_str(), current, ImGuiSelectableFlags_AllowOverlap)) {
             animator.bindPose = false;
+            animator.useBlendTree = false;
             animator.player.play(static_cast<i32>(i), current ? 0.0f : m_crossfade);
         }
         if (physics) {
             ImGui::PopStyleColor();
         }
-        tooltip(physics ? "Physics animation: in Play the muscles follow it (hits, rebounds)"
-                        : "Regular (kinematic) animation");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::SetTooltip("%s%s", physics ? "Physics animation: in Play the muscles follow it" : "Regular (kinematic) animation",
+                              std::abs(clip.rootYawRate()) > 0.0f ? "\nRoot yaw extracted: the character turns, not the pose"
+                              : clip.hasRootMotion()               ? "\nRoot motion: the clip's step moves the character"
+                                                                   : "");
+        }
         char duration[32];
         std::snprintf(duration, sizeof(duration), "%s %.2fs", physics ? "PHYS" : "KIN", static_cast<double>(clip.duration()));
         ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - ImGui::CalcTextSize(duration).x);
@@ -272,7 +479,7 @@ void AnimationEditor::drawTransport(scene::AnimatorComponent& animator)
     const anim::AnimationClip* clip =
         player.clip() >= 0 && static_cast<usize>(player.clip()) < clips.size() ? &clips[static_cast<usize>(player.clip())] : nullptr;
     const f32 duration = clip ? clip->duration() : 0.0f;
-    const f32 frame = 1.0f / kFrameRate;
+    const f32 frameTime = 1.0f / kFrameRate;
 
     ImGui::BeginDisabled(clip == nullptr);
     const ImVec2 button(34.0f, 0.0f);
@@ -283,7 +490,7 @@ void AnimationEditor::drawTransport(scene::AnimatorComponent& animator)
     ImGui::SameLine();
     if (ImGui::Button("<", button)) {
         player.playing = false;
-        player.setTime(player.time() - frame, clips);
+        player.setTime(player.time() - frameTime, clips);
     }
     tooltip("Previous frame");
     ImGui::SameLine();
@@ -297,7 +504,7 @@ void AnimationEditor::drawTransport(scene::AnimatorComponent& animator)
     ImGui::SameLine();
     if (ImGui::Button(">", button)) {
         player.playing = false;
-        player.setTime(player.time() + frame, clips);
+        player.setTime(player.time() + frameTime, clips);
     }
     tooltip("Next frame");
     ImGui::SameLine();
@@ -314,8 +521,6 @@ void AnimationEditor::drawTransport(scene::AnimatorComponent& animator)
 
     ImGui::SameLine();
     ImGui::Checkbox("Loop", &player.loop);
-    ImGui::SameLine();
-
     ImGui::SetNextItemWidth(160.0f);
     ImGui::SliderFloat("Speed", &player.speed, -2.0f, 3.0f, "x%.2f");
     tooltip("Playback rate; negative plays backwards. Ctrl+click to type a value.");
@@ -355,6 +560,7 @@ void AnimationEditor::drawTimeline(scene::AnimatorComponent& animator)
         m_scrubbing = true;
         m_playingBeforeScrub = player.playing;
         animator.bindPose = false;
+        animator.useBlendTree = false;
     }
     if (m_scrubbing && ImGui::IsItemActive()) {
         player.playing = false;
@@ -455,11 +661,13 @@ const std::vector<f32>& AnimationEditor::keyTimes(const anim::AnimationClip& cli
     return it->second;
 }
 
+// ---------------------------------------------------------------------------------------------- //
+// Skeleton
+
 void AnimationEditor::drawSkeleton(const scene::AnimatorComponent& animator)
 {
     const anim::Skeleton& skeleton = animator.model->skeleton;
     const usize n = skeleton.jointCount();
-    ImGui::SeparatorText("Skeleton");
 
     m_children.assign(n, {});
     for (usize j = 0; j < n; ++j) {
@@ -474,14 +682,12 @@ void AnimationEditor::drawSkeleton(const scene::AnimatorComponent& animator)
         const anim::JointTransform t = animator.localPose.get(j);
         const glm::vec3 euler = glm::degrees(glm::eulerAngles(t.rotation));
         ImGui::Text("%s", skeleton.names()[j].c_str());
-        ImGui::TextDisabled("T %.3f %.3f %.3f", static_cast<double>(t.translation.x), static_cast<double>(t.translation.y),
-                            static_cast<double>(t.translation.z));
-        ImGui::TextDisabled("R %.1f %.1f %.1f", static_cast<double>(euler.x), static_cast<double>(euler.y),
-                            static_cast<double>(euler.z));
-        ImGui::TextDisabled("S %.2f %.2f %.2f", static_cast<double>(t.scale.x), static_cast<double>(t.scale.y),
-                            static_cast<double>(t.scale.z));
+        ImGui::TextDisabled("T %.3f %.3f %.3f   R %.1f %.1f %.1f   S %.2f %.2f %.2f", static_cast<double>(t.translation.x),
+                            static_cast<double>(t.translation.y), static_cast<double>(t.translation.z),
+                            static_cast<double>(euler.x), static_cast<double>(euler.y), static_cast<double>(euler.z),
+                            static_cast<double>(t.scale.x), static_cast<double>(t.scale.y), static_cast<double>(t.scale.z));
     } else {
-        ImGui::TextDisabled("Click a joint to inspect it.");
+        ImGui::TextDisabled("Click a joint to inspect it (it is highlighted in the preview with Skeleton on).");
     }
 
     ImGui::BeginChild("##joints", ImVec2(0, 0), ImGuiChildFlags_Borders);
@@ -513,6 +719,7 @@ void AnimationEditor::drawJointNode(const scene::AnimatorComponent& animator, us
     }
     if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
         m_joint = m_joint == static_cast<i32>(joint) ? -1 : static_cast<i32>(joint);
+        m_showSkeleton = true;
     }
     if (open && !m_children[joint].empty()) {
         for (const usize child : m_children[joint]) {

@@ -26,6 +26,7 @@ struct SkinnedMesh {
 // Everything needed to play an animated character: skinned mesh, skeleton and its clips.
 struct SkinnedModel {
     std::string name;
+    std::string sourcePath; // file it was loaded from (actor settings are saved next to it)
     SkinnedMesh skin;
     Skeleton skeleton;
     std::vector<AnimationClip> clips;
@@ -37,6 +38,8 @@ struct SkinnedModel {
     // glTF meshes under a rotated parent node).
     glm::vec3 restBoundsMin{0.0f};
     glm::vec3 restBoundsMax{0.0f};
+    // Clips were processed by anim::prepareLocomotionClips (centred roots, loops, in-place turns).
+    bool locomotionPrepared = false;
 
     [[nodiscard]] bool jointIsBone(usize joint) const { return isBone.empty() || isBone[joint] != 0; }
 };
@@ -46,9 +49,11 @@ struct SkinnedModel {
 
 // CPU linear blend skinning: out = sum(weight_i * skinMatrix[joint_i]) * bindVertex.
 // Normals use the upper 3x3 of the blended matrix and are renormalized (assumes no strong
-// non-uniform scale in the joints). Output spans must have one entry per mesh vertex.
+// non-uniform scale in the joints). Tangents (if the mesh has them and `outTangents` is not
+// empty) are rotated the same way and keep their handedness (w). Output spans must have one
+// entry per mesh vertex.
 void skinVertices(const SkinnedMesh& skin, std::span<const glm::mat4> skinMatrices, std::span<glm::vec3> outPositions,
-                  std::span<glm::vec3> outNormals);
+                  std::span<glm::vec3> outNormals, std::span<glm::vec4> outTangents = {});
 
 // The model's mesh skinned in the skeleton's rest pose: what a static (non-animated) instance of
 // the model shows.

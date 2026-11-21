@@ -70,4 +70,12 @@ void AnimationClip::sample(f32 time, bool loop, Pose& out) const
     }
 }
 
+glm::vec3 AnimationClip::sampleRootMotion(f32 time) const
+{
+    if (m_rootMotion.empty()) {
+        return glm::vec3(0.0f);
+    }
+    return sampleTrack(m_rootMotion, std::clamp(time, 0.0f, m_duration));
+}
+
 } // namespace kinetic::anim

@@ -41,6 +41,7 @@ struct ShapeDesc {
     f32 radius = 0.5f;           // sphere, capsule
     f32 halfHeight = 0.5f;       // capsule: half length of the cylinder part
     glm::vec3 offset{0.0f};      // shape centre relative to the body origin
+    glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f}; // shape orientation in body space (e.g. a capsule along a bone)
 };
 
 struct BodyDesc {
@@ -53,11 +54,28 @@ struct BodyDesc {
     glm::vec3 centerOfMass{0.0f};     // local offset from the shape centre (e.g. a sword's balance point)
     f32 friction = 0.6f;
     f32 restitution = 0.0f;
+    // Material hardness 0..1. A `sharp` body (a blade) meeting a body below kSoftHardness does not
+    // bounce: it cuts in against a viscous-elastic resistance growing with the hardness (flesh slows
+    // a sword down, stone stops it). All other contacts are rigid (restitution / friction).
+    f32 hardness = 1.0f;
+    bool sharp = false;
     f32 linearDamping = 0.0f;         // 0 keeps force reconstruction exact
     f32 angularDamping = 0.0f;
     bool continuousCollision = false; // CCD for fast, thin bodies (blades)
     // Bodies of one rig: same non-zero group = never collide with each other.
     u32 collisionGroup = 0;
+};
+
+inline constexpr f32 kSoftHardness = 0.65f;
+
+// Muscle model v1: position motor with a spring and a torque limit.
+//   torque = clamp(stiffness * (target - angle) - damping * angularVelocity, -maxTorque, maxTorque)
+// On ball joints the same per axis (swing and twist motors), towards a target orientation.
+struct Muscle {
+    f32 stiffness = 300.0f; // N m / rad
+    f32 damping = 20.0f;    // N m s / rad
+    f32 maxTorque = 50.0f;  // N m (muscle strength)
+    bool enabled = true;
 };
 
 // Ball-and-socket joint with a cone and twist limits (hips, shoulders, spine, neck).
@@ -74,15 +92,8 @@ struct SwingTwistDesc {
     f32 twistMin = -0.5f;                       // rad
     f32 twistMax = 0.5f;                        // rad
     f32 friction = 0.0f;                        // N m, joint friction (limp ragdolls look less floppy)
-};
-
-// Muscle model v1: position motor with a spring and a torque limit.
-//   torque = clamp(stiffness * (target - angle) - damping * angularVelocity, -maxTorque, maxTorque)
-struct Muscle {
-    f32 stiffness = 300.0f; // N m / rad
-    f32 damping = 20.0f;    // N m s / rad
-    f32 maxTorque = 50.0f;  // N m (muscle strength)
-    bool enabled = true;
+    // 3-axis muscle (off by default): drives the child towards setTargetRotation.
+    Muscle muscle{0.0f, 0.0f, 0.0f, false};
 };
 
 // One-axis joint (elbow-like). The angle is the child's rotation about `axis` relative to the
@@ -133,7 +144,7 @@ struct JointState {
     f32 angularVelocity = 0.0f; // child relative to parent about the axis, rad/s
     glm::vec3 force{0.0f};      // N: force the parent applies to the child at the anchor
     glm::vec3 torque{0.0f};     // N m: rotational constraint torque on the child (fixed joints)
-    f32 muscleTorque = 0.0f;    // N m about the axis, on the child
+    f32 muscleTorque = 0.0f;    // N m about the axis, on the child (ball joints: magnitude)
     f32 limitTorque = 0.0f;     // N m about the axis from the joint limits
 };
 
@@ -143,6 +154,7 @@ struct ContactPoint {
     glm::vec3 position{0.0f};
     glm::vec3 normal{0.0f}; // from A towards B
     f32 depth = 0.0f;
+    bool soft = false; // a soft-material contact (resistance instead of a rigid response)
 };
 
 class PhysicsWorld {
@@ -175,6 +187,13 @@ public:
     void setRestitution(BodyId body, f32 restitution);
     void setFriction(BodyId body, f32 friction);
     void setTargetAngle(JointId joint, f32 angle);
+    // Ball joints: wanted rotation of the child body relative to the parent body
+    // (child world = parent world * relative).
+    void setTargetRotation(JointId joint, const glm::quat& relative);
+    void setHardness(BodyId body, f32 hardness);
+    // External force (N, at the centre of mass) and torque (N m) on a dynamic body during the next
+    // step only (e.g. a balance assist). Not counted as contact force.
+    void addForce(BodyId body, const glm::vec3& force, const glm::vec3& torque = glm::vec3(0.0f));
     void setGravity(const glm::vec3& gravity);
     [[nodiscard]] glm::vec3 gravity() const;
 
