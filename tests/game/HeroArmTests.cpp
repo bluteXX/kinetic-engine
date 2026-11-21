@@ -310,7 +310,6 @@ TEST_CASE("Physics body: with the whole body on muscles the warrior stands and a
     f32 worst = 0.0f;
     for (int i = 0; i < 150; ++i) {
         w.step();
-        CHECK_FALSE(w.body()->down());
         const auto& animator = w.scene.registry().get<scene::AnimatorComponent>(w.hero);
         const glm::vec3 pelvisAnimated = glm::vec3(w.scene.registry().get<scene::TransformComponent>(w.hero).matrix() *
                                                    animator.animatedModel[static_cast<usize>(w.body()->layout().segments.front().joint)][3]);
@@ -323,7 +322,7 @@ TEST_CASE("Physics body: with the whole body on muscles the warrior stands and a
     (void)start;
 }
 
-TEST_CASE("Physics body: a fully physical warrior stopped by a stone wall is knocked down, then gets back up")
+TEST_CASE("Physics body: a fully physical warrior held back by a stone wall stays on its feet and keeps its muscles")
 {
     if (!haveWarrior()) return;
     Arena w(false);
@@ -336,22 +335,19 @@ TEST_CASE("Physics body: a fully physical warrior stopped by a stone wall is kno
     w.play.start(w.scene, w.camera);
     for (int i = 0; i < 60; ++i) w.step();
     REQUIRE(w.body() != nullptr);
-    REQUIRE_FALSE(w.body()->down());
+    const f32 standing = w.body()->rootPosition(w.play.world()).y;
     // The animation leaps through the wall (like a leap attack's root motion would): the body
-    // cannot follow.
+    // cannot follow - but it does not fall over either.
     t.position += forward * 1.2f;
-    bool wentDown = false;
-    bool gotUp = false;
+    f32 lowest = standing;
     for (int i = 0; i < 300; ++i) {
         w.step();
-        wentDown |= w.body()->down();
-        gotUp |= wentDown && w.body()->phase() == physanim::PhysicalBody::Phase::Animated;
+        lowest = std::min(lowest, w.body()->rootPosition(w.play.world()).y);
+        CHECK(w.simulatedBodies() == w.body()->segmentCount());
     }
-    CHECK(wentDown);
-    CHECK(gotUp);
-    // It fell (and got up) on its own side of the wall.
-    CHECK(glm::dot(w.body()->rootPosition(w.play.world()) - origin, forward) < 0.5f);
-    CHECK(glm::dot(t.position - origin, forward) < 0.5f);
+    MESSAGE("pelvis height: standing " << standing << " m, lowest " << lowest << " m");
+    CHECK(lowest > 0.7f * standing);
+    CHECK(glm::dot(w.body()->rootPosition(w.play.world()) - origin, forward) < 0.5f); // still on its side of the wall
 }
 
 TEST_CASE("Blade edge: aligning the Mixamo attacks makes the sword cut through the air edge first")
@@ -409,4 +405,200 @@ TEST_CASE("Blade edge: aligning an actor's attack is saved with the actor and it
     const Json saved = editor::actorToJson(w.scene, w.hero);
     REQUIRE(saved["edgeAlignedClips"].size() == 1);
     CHECK(saved["edgeAlignedClips"][0].asString() == animator.model->clips[static_cast<usize>(clip)].name());
+}
+
+TEST_CASE("Physics body: a swing stopped by stone recoils into the guard instead of dragging the arm on through the wall")
+{
+    if (!haveWarrior()) return;
+    Arena w;
+    auto& registry = w.scene.registry();
+    auto& animator = registry.get<scene::AnimatorComponent>(w.hero);
+    // The grip from the fist of the combat idle (not the rest pose's open hand).
+    registry.get<scene::AttachmentComponent>(w.sword).offset = anim::weaponSocket(animator.model->skeleton, w.hand(), animator.model->clips);
+    const std::vector<i32> chain = anim::attackChain(*animator.blendTree);
+    REQUIRE(chain.size() >= 2);
+    const i32 clip = anim::stateClip(*animator.blendTree, chain[1]); // the downward slash
+    const auto& a = registry.get<scene::AttachmentComponent>(w.sword);
+    const physanim::StrikePoint sp = physanim::findStrikePoint(animator.model->skeleton, animator.model->clips[static_cast<usize>(clip)],
+                                                               a.joint, a.offset, registry.get<scene::WeaponComponent>(w.sword));
+    const physanim::TargetBox box = physanim::strikeTarget(sp, registry.get<scene::TransformComponent>(w.hero).matrix());
+    w.addTarget(box.center, box.halfExtents, scene::SurfaceMaterial::Stone);
+    w.play.start(w.scene, w.camera);
+    for (int i = 0; i < 20; ++i) w.step();
+    w.step(editor::PlayInput{.playAttack = 1});
+    bool interrupted = false;
+    bool froze = false;
+    f32 worstAfter = 0.0f;
+    f32 hitTime = -1.0f;
+    for (int i = 0; i < 180; ++i) {
+        const f32 before = animator.treeState.stateTime;
+        w.step();
+        if (hitTime < 0.0f && !w.body()->hits().empty()) hitTime = static_cast<f32>(i);
+        if (hitTime >= 0.0f) {
+            interrupted |= std::ranges::find(chain, animator.treeState.state) == chain.end();
+            froze |= animator.treeState.stateTime == before; // hit stop
+            if (static_cast<f32>(i) > hitTime + 4.0f && w.simulatedBodies() > 0) {
+                worstAfter = std::max(worstAfter, glm::degrees(w.body()->trackingError(w.play.world(), w.hand())));
+            }
+        }
+    }
+    REQUIRE(hitTime >= 0.0f);
+    const physanim::Hit& h = w.body()->hits().front();
+    MESSAGE(std::string(physanim::hitResultName(h.result)) << " at " << h.speed << " m/s; hand off the animation after the recoil: " << worstAfter << " deg; "
+                                              << w.body()->hits().size() << " hit(s)");
+    CHECK((h.result == physanim::HitResult::Stop || h.result == physanim::HitResult::Rebound));
+    CHECK(w.body()->hits().size() <= 2); // no chattering series of hits
+    CHECK(interrupted);
+    CHECK(froze);
+    CHECK(worstAfter < 60.0f); // eases into the guard, no whip after an animation already past the wall
+    CHECK(w.simulatedBodies() == 0);
+}
+
+TEST_CASE("Combo: the grip goes through the fist of the combat idle")
+{
+    if (!haveWarrior()) return;
+    const auto model = warriorModel();
+    const anim::Skeleton& sk = model->skeleton;
+    const i32 hand = anim::findWeaponHand(sk);
+    const glm::mat4 socket = anim::weaponSocket(sk, hand, model->clips);
+    // The middle finger in the combat idle wraps around the grip: its joints are all about as far
+    // from the grip's axis (a circle), and the blade leaves the fist on the index finger's side.
+    anim::Pose pose = sk.restPose();
+    const anim::AnimationClip& idle = model->clips[static_cast<usize>(anim::findCombatIdle(model->clips))];
+    idle.sample(idle.duration() * 0.5f, false, pose);
+    std::vector<glm::mat4> m(sk.jointCount());
+    anim::localToModel(sk, pose, m);
+    const glm::mat4 grip = m[static_cast<usize>(hand)] * socket;
+    const glm::vec3 o(grip[3]);
+    const glm::vec3 axis = glm::normalize(glm::vec3(grip[1]));
+    const auto joint = [&](const char* n) { return glm::vec3(m[static_cast<usize>(*sk.findJoint(n))][3]); };
+    std::array<f32, 3> d{};
+    const std::array<const char*, 3> middle = {"mixamorig:RightHandMiddle1", "mixamorig:RightHandMiddle2", "mixamorig:RightHandMiddle3"};
+    for (usize k = 0; k < 3; ++k) {
+        const glm::vec3 r = joint(middle[k]) - o;
+        d[k] = glm::length(r - axis * glm::dot(r, axis));
+    }
+    MESSAGE("middle finger joints from the grip axis: " << d[0] << " " << d[1] << " " << d[2]);
+    CHECK(std::abs(d[0] - d[1]) < 0.1f * d[0]);
+    CHECK(std::abs(d[0] - d[2]) < 0.1f * d[0]);
+    CHECK(glm::dot(axis, joint("mixamorig:RightHandIndex1") - joint("mixamorig:RightHandPinky1")) > 0.0f);
+}
+
+TEST_CASE("Physics body: after a blade bounces off stone a queued press goes straight on into the next attack of the combo")
+{
+    if (!haveWarrior()) return;
+    Arena w;
+    auto& registry = w.scene.registry();
+    auto& animator = registry.get<scene::AnimatorComponent>(w.hero);
+    registry.get<scene::AttachmentComponent>(w.sword).offset = anim::weaponSocket(animator.model->skeleton, w.hand(), animator.model->clips);
+    const std::vector<i32> chain = anim::attackChain(*animator.blendTree);
+    const i32 clip = anim::stateClip(*animator.blendTree, chain[0]);
+    const auto& a = registry.get<scene::AttachmentComponent>(w.sword);
+    const physanim::StrikePoint sp = physanim::findStrikePoint(animator.model->skeleton, animator.model->clips[static_cast<usize>(clip)],
+                                                               a.joint, a.offset, registry.get<scene::WeaponComponent>(w.sword));
+    const physanim::TargetBox box = physanim::strikeTarget(sp, registry.get<scene::TransformComponent>(w.hero).matrix());
+    w.addTarget(box.center, box.halfExtents, scene::SurfaceMaterial::Stone);
+    w.play.start(w.scene, w.camera);
+    for (int i = 0; i < 20; ++i) w.step();
+    // Attack 1 into the pillar, the button pressed again during the swing (queued).
+    w.step(editor::PlayInput{.attack = true});
+    f32 hit = -1.0f;
+    f32 next = -1.0f;
+    for (int i = 0; i < 150 && next < 0.0f; ++i) {
+        w.step(editor::PlayInput{.attack = i == 15});
+        const f32 t = static_cast<f32>(i) * Arena::kDt;
+        if (hit < 0.0f && w.body()->hardHits() > 0) hit = t;
+        if (animator.treeState.state != chain[0]) {
+            CHECK(animator.treeState.state == chain[1]); // the combo goes on: attack 2, not a fresh attack 1
+            next = t;
+        }
+    }
+    MESSAGE("bounce at " << hit << " s, attack 2 at " << next << " s");
+    REQUIRE(hit >= 0.0f);
+    REQUIRE(next >= 0.0f);
+    CHECK(next - hit < 0.1f); // right after the hit stop: the rest of attack 1 is the move into attack 2
+    CHECK(animator.treeState.fromSnapshot); // from the pose where the wall stopped the swing
+}
+
+TEST_CASE("Physics body: a press shortly after the bounce still continues the combo")
+{
+    if (!haveWarrior()) return;
+    Arena w;
+    auto& registry = w.scene.registry();
+    auto& animator = registry.get<scene::AnimatorComponent>(w.hero);
+    registry.get<scene::AttachmentComponent>(w.sword).offset = anim::weaponSocket(animator.model->skeleton, w.hand(), animator.model->clips);
+    const std::vector<i32> chain = anim::attackChain(*animator.blendTree);
+    const i32 clip = anim::stateClip(*animator.blendTree, chain[0]);
+    const auto& a = registry.get<scene::AttachmentComponent>(w.sword);
+    const physanim::StrikePoint sp = physanim::findStrikePoint(animator.model->skeleton, animator.model->clips[static_cast<usize>(clip)],
+                                                               a.joint, a.offset, registry.get<scene::WeaponComponent>(w.sword));
+    const physanim::TargetBox box = physanim::strikeTarget(sp, registry.get<scene::TransformComponent>(w.hero).matrix());
+    w.addTarget(box.center, box.halfExtents, scene::SurfaceMaterial::Stone);
+    w.play.start(w.scene, w.camera);
+    for (int i = 0; i < 20; ++i) w.step();
+    w.step(editor::PlayInput{.attack = true}); // no second press yet
+    int hitFrame = -1;
+    for (int i = 0; i < 150 && hitFrame < 0; ++i) {
+        w.step();
+        if (w.body()->hardHits() > 0) hitFrame = i;
+    }
+    REQUIRE(hitFrame >= 0);
+    for (int i = 0; i < 12; ++i) w.step(); // heading into the guard
+    CHECK(std::ranges::find(chain, animator.treeState.state) == chain.end());
+    w.step(editor::PlayInput{.attack = true});
+    CHECK(animator.treeState.state == chain[1]);
+}
+
+TEST_CASE("Combo: as set up in Warrior.actor, a press anywhere in the swing chains the next attack")
+{
+    if (!haveWarrior()) return;
+    // As in the game: the actor file (graph, full-body physics bones, socket).
+    auto loaded = assets::loadSkinnedModel(kWarriorDir / "Warrior.fbx");
+    REQUIRE(loaded.has_value());
+    auto model = std::make_shared<anim::SkinnedModel>(std::move(*loaded));
+    for (const char* file : {"Attack1_CrossSlash.fbx", "Attack2_DownwardSlash.fbx", "Attack3_PowerSlash.fbx", "Idle_Combat.fbx"}) {
+        std::string error;
+        REQUIRE(assets::importAnimationsInto(*model, kWarriorDir / "animations" / file, &error).size() == 1);
+    }
+    (void)anim::prepareLocomotionClips(*model);
+    model->locomotionPrepared = true;
+    for (int k = 0; k < 2; ++k) {
+        std::string ok;
+        for (int d = 0; d <= 120; d += 3) { // press d frames after attack k started
+            scene::Scene scene;
+            const entt::entity camera = scene.createCamera("Camera", {0, 1.6f, -4}, {0, 1, 0});
+            const entt::entity floor = scene.createEntity("Floor");
+            scene.registry().emplace<scene::ColliderComponent>(floor, glm::vec3(20, 0.1f, 20), glm::vec3(0, -0.1f, 0));
+            const entt::entity hero = scene.createEntity("Warrior");
+            auto& an = scene.registry().emplace<scene::AnimatorComponent>(hero);
+            an.model = model;
+            an.player.play(0);
+            REQUIRE(editor::makePlayableHero(scene, hero, 1.8f).ok);
+            const entt::entity sword = scene.createEntity("Sword");
+            auto& a = scene.registry().emplace<scene::AttachmentComponent>(sword);
+            a.parent = hero;
+            a.joint = anim::findWeaponHand(model->skeleton);
+            scene.registry().emplace<scene::WeaponComponent>(sword);
+            editor::loadActorWeapons(scene, hero);
+            editor::PlayMode play;
+            play.start(scene, camera);
+            for (int i = 0; i < 20; ++i) play.update(Arena::kDt, {}, scene);
+            const std::vector<i32> chain = anim::attackChain(*an.blendTree);
+            play.update(Arena::kDt, editor::PlayInput{.playAttack = k}, scene);
+            bool next = false;
+            for (int i = 0; i < 200 && !next; ++i) {
+                play.update(Arena::kDt, editor::PlayInput{.attack = i == d}, scene);
+                next = an.treeState.state == chain[static_cast<usize>(k + 1)];
+            }
+            ok += next ? "#" : ".";
+            play.stop(scene);
+        }
+        MESSAGE("attack " << k + 1 << " -> " << k + 2 << " (press at 0.05 s steps): " << ok);
+        // Early presses (during the swing) are kept, and the window stays open well over a second.
+        const usize first = ok.find('#');
+        REQUIRE(first != std::string::npos);
+        CHECK(first <= 3);                                      // within 0.15 s of the attack starting
+        CHECK(std::ranges::count(ok, '#') >= 26);               // >= 1.3 s
+        CHECK(ok.find('.', first) == ok.find_last_of('#') + 1); // one window, no gaps
+    }
 }

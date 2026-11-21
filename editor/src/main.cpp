@@ -27,6 +27,8 @@
 #include "PlayMode.h"
 #include "SwordStrikeTest.h"
 
+#include <kinetic/core/Sword.h>
+
 #include <kinetic/animation/Combat.h>
 #include <kinetic/physanim/PhysicalBody.h>
 #include <kinetic/animation/PoseOps.h>
@@ -607,25 +609,6 @@ private:
 
     // --- Test scene: uneven ground, a hero with a sword, the tentacle ------------------------------
 
-    // A long sword (metres, grip at the origin, blade along +Y, flat side facing +Z).
-    static MeshData makeSwordMesh()
-    {
-        MeshData sword;
-        const auto add = [&](const glm::vec3& half, const glm::vec3& center) {
-            const MeshData part = makeBoxMesh(half, center);
-            const auto base = static_cast<u32>(sword.positions.size());
-            sword.positions.insert(sword.positions.end(), part.positions.begin(), part.positions.end());
-            sword.normals.insert(sword.normals.end(), part.normals.begin(), part.normals.end());
-            for (const u32 i : part.indices) sword.indices.push_back(base + i);
-        };
-        add({0.016f, 0.10f, 0.016f}, {0.0f, 0.0f, 0.0f});     // grip
-        add({0.025f, 0.022f, 0.025f}, {0.0f, -0.12f, 0.0f});  // pommel
-        add({0.11f, 0.015f, 0.025f}, {0.0f, 0.115f, 0.0f});   // cross guard
-        add({0.024f, 0.42f, 0.005f}, {0.0f, 0.55f, 0.0f});    // blade
-        add({0.012f, 0.03f, 0.004f}, {0.0f, 0.995f, 0.0f});   // tip
-        return sword;
-    }
-
     // Attaches a sword to the selected animated actor's weapon hand (anim::findWeaponHand).
     entt::entity giveSword(entt::entity actor)
     {
@@ -639,13 +622,16 @@ private:
             return entt::null;
         }
         if (m_swordMesh == renderer::Renderer::kInvalidMesh) {
-            m_swordMesh = renderer().addMesh("Sword", makeSwordMesh());
+            // A longsword (kinetic::makeSwordMesh): grip at the origin, blade along +Y.
+            m_swordMesh = renderer().addMesh("Sword", kinetic::makeSwordMesh());
+            m_swordTexture = renderer().addTexture("Sword", kinetic::makeSwordTexture());
         }
-        const entt::entity sword = m_scene.createMesh("Sword", m_swordMesh, glm::vec4(0.78f, 0.80f, 0.84f, 1.0f));
+        const entt::entity sword = m_scene.createMesh("Sword", m_swordMesh, glm::vec4(1.0f));
+        registry.get<scene::MeshRendererComponent>(sword).baseColorTexture = m_swordTexture;
         auto& attachment = registry.emplace<scene::AttachmentComponent>(sword);
         attachment.parent = actor;
         attachment.joint = hand;
-        attachment.offset = anim::weaponSocket(animator->model->skeleton, hand);
+        attachment.offset = anim::weaponSocket(animator->model->skeleton, hand, animator->model->clips);
         // Collision box matching makeSwordMesh (guard to tip); in Play the bones holding it can run
         // on muscles (a clip's physics bones).
         registry.emplace<scene::WeaponComponent>(sword);
@@ -1364,10 +1350,10 @@ private:
         ImGui::BeginDisabled(hand < 0);
         if (ImGui::Button("Reset to hand", ImVec2(-FLT_MIN, 0))) {
             a.joint = hand;
-            a.offset = anim::weaponSocket(*skeleton, hand);
+            a.offset = anim::weaponSocket(*skeleton, hand, animator->model->clips);
         }
         ImGui::EndDisabled();
-        tooltip("Automatic grip in the weapon hand (palm, between the fingers and the thumb)");
+        tooltip("Automatic grip in the weapon hand: through the fist of its combat idle (or first attack)");
     }
 
     // The few things you toggle all the time, as one-line switches.
@@ -1770,6 +1756,7 @@ private:
     usize m_objectCounter = 1;
     f32 m_heroHeight = 1.8f;
     scene::MeshId m_swordMesh = renderer::Renderer::kInvalidMesh;
+    scene::TextureId m_swordTexture = scene::kWhiteTexture;
     std::string m_heroMessage;
     entt::entity m_heroMessageFor = entt::null;
 };

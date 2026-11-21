@@ -163,7 +163,14 @@ private:
         u32 group = 0;
         bool failed = false;
         physanim::PhysicalBody body;
+        u32 hardHits = 0;          // body.hardHits() already reacted to
+        f32 hitStopEnd = -1.0f;    // physics time the hit stop ends
+        i32 bounceNext = -1;       // after bouncing off a wall: the combo's next attack ...
+        f32 bounceUntil = -1.0f;   // ... a press until then goes straight into it
     };
+    // A hard hit on a wall during an attack: hit stop, then the rest of the swing becomes a move
+    // into the next attack of the combo (when one is queued) or into the guard.
+    void reactToHardHits(scene::Scene& scene);
     std::vector<std::unique_ptr<HeroBody>> m_bodies;
     void updateHeroBodies(scene::Scene& scene, f32 frameTime);
     std::vector<physanim::HitEvent> m_hitEvents;

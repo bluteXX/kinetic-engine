@@ -67,19 +67,25 @@ struct BodySettings {
     f32 reflexStrength = 0.25f;
     f32 recoverTime = 0.35f;
     f32 hold = 0.3f;
+    // The wrist holding a weapon: a firm grip, `gripStrength` times stronger than its muscle would
+    // be from the inertia alone (the long blade's lever), and it does not yield on a hit (the
+    // shoulder and the elbow do), so the sword does not flop about in the hand.
+    f32 gripStrength = 2.5f;
+    // Ligaments: how far (rad) a simulated joint may be bent away from its animated angle. Past
+    // that its torque limit rises steeply (`ligamentStiffness` x strength per limit exceeded) and
+    // it pulls back onto the animation, so a stopped blade cannot fold the wrist or the elbow into
+    // poses no arm can take.
+    f32 wristLimit = 0.3f;    // ~17 degrees (the weapon hand)
+    f32 jointLimit = 0.45f;   // ~25 degrees (every other joint)
+    f32 ligamentStiffness = 12.0f;
     // A bone leaving the physics bones keeps tracking the animation this long, then turns
     // kinematic (no pop).
     f32 releaseTime = 0.2f;
     // Full body (the pelvis simulated): a balance assist pulls the pelvis towards the animation,
-    // with limited force. When something holds the body back too far (a wall, a stone) it gives
-    // up: the character is knocked down (ragdoll), lies for `downTime`, then gets back up.
+    // with limited force. The character never falls over: whatever holds it back, it stays on its
+    // feet and its muscles keep working.
     f32 assistFrequency = 6.0f;      // Hz
     f32 assistMaxAcceleration = 25.0f; // m/s^2 (on top of carrying the weight)
-    f32 knockdownDistance = 0.16f;   // fraction of the height between pelvis and its animated place
-    f32 knockdownAngle = 0.9f;       // rad of the pelvis off its animated orientation
-    f32 ragdollStrength = 0.06f;     // muscles while down
-    f32 downTime = 1.5f;             // s
-    f32 getUpTime = 0.6f;            // s blending from the lying pose back to the animation
 };
 
 // A weapon held by the model: welded to the body of `joint` at `offset` (AttachmentComponent).
@@ -97,8 +103,6 @@ struct WeaponMount {
 // into the animator as bone overrides.
 class PhysicalBody {
 public:
-    enum class Phase : u8 { Animated, Down, GettingUp };
-
     bool build(physics::PhysicsWorld& world, const anim::SkinnedModel& model, std::span<const glm::mat4> pose,
                const glm::mat4& entityWorld, std::span<const WeaponMount> weapons, const std::string& name, u32 collisionGroup,
                const BodySettings& settings = {});
@@ -116,8 +120,6 @@ public:
     static void clearOverrides(scene::AnimatorComponent& animator);
 
     [[nodiscard]] bool built() const { return !m_segments.empty(); }
-    [[nodiscard]] Phase phase() const { return m_phase; }
-    [[nodiscard]] bool down() const { return m_phase == Phase::Down; }
     [[nodiscard]] bool simulated() const; // any dynamic body
     [[nodiscard]] const BodyLayout& layout() const { return m_layout; }
     [[nodiscard]] usize segmentCount() const { return m_segments.size(); }
@@ -129,6 +131,9 @@ public:
     [[nodiscard]] usize weaponCount() const { return m_weapons.size(); }
     [[nodiscard]] physics::BodyId weapon(usize i = 0) const { return m_weapons[i].body; }
     [[nodiscard]] const std::vector<Hit>& hits(usize weapon = 0) const { return m_weapons[weapon].tracker.hits(); }
+    // How many hard hits (a weapon rebounding, stopped or stuck) there have been: gameplay reacts
+    // when it grows (hit stop, the attack is interrupted instead of swinging on through the wall).
+    [[nodiscard]] u32 hardHits() const { return m_hardHits; }
     // Angle (rad) between the simulated and the animated orientation of `joint`'s body.
     [[nodiscard]] f32 trackingError(const physics::PhysicsWorld& world, i32 joint) const;
     // World position of the pelvis body.
@@ -151,6 +156,7 @@ private:
         f32 mass = 0.0f;
         bool wanted = false;         // in this frame's physics bones
         bool dynamic = false;
+        bool grip = false;           // holds a weapon (the wrist above it is the grip)
         f32 releaseStart = -1.0f;    // >= 0: leaving physics, still tracking
         f32 reflexStart = -1e9f;
         Target target, previous;     // animated world frame (this / last frame)
@@ -167,8 +173,6 @@ private:
     [[nodiscard]] Target interpolated(const Segment& s, f32 alpha) const;
     void setSegmentDynamic(physics::PhysicsWorld& world, usize i, bool dynamic);
     void syncWeapons(physics::PhysicsWorld& world);
-    void knockDown(physics::PhysicsWorld& world, f32 time);
-    void getUp(physics::PhysicsWorld& world, f32 time);
     void assist(physics::PhysicsWorld& world, f32 dt, f32 alpha);
 
     BodySettings m_settings;
@@ -180,11 +184,7 @@ private:
     bool m_hasTargets = false;
     f32 m_totalMass = 0.0f;
     f32 m_worldHeight = 1.8f;
-    Phase m_phase = Phase::Animated;
-    f32 m_phaseStart = 0.0f;
-    f32 m_offBalance = 0.0f; // s the pelvis has been too far from the animation
-    std::vector<glm::mat4> m_frozen; // world frames of the lying body (getting up)
-    f32 m_getUpWeight = 1.0f;
+    u32 m_hardHits = 0;
 };
 
 // --- Strike analysis --------------------------------------------------------------------------------

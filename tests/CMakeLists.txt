@@ -15,6 +15,7 @@ add_executable(kinetic_tests
     scene/CameraTests.cpp
     core/RayTests.cpp
     core/JsonTests.cpp
+    core/SwordMeshTests.cpp
     physics/PhysicsWorldTests.cpp
     physics/SwordStrikeTests.cpp
     game/PlayModeTests.cpp

@@ -687,6 +687,13 @@ std::string lowered(std::string s)
 
 } // namespace
 
+namespace {
+// After bouncing off a wall (PlayMode::reactToHardHits).
+constexpr f32 kBounceToNext = 0.3f;  // s from where the wall stopped the swing into the next attack
+constexpr f32 kBounceToGuard = 0.4f; // s ... into the guard (no attack queued)
+constexpr f32 kBounceLate = 0.25f;   // s after reaching the guard a press still continues the combo
+} // namespace
+
 void PlayMode::update(f32 dt, const PlayInput& input, scene::Scene& scene)
 {
     if (!m_active) {
@@ -695,22 +702,10 @@ void PlayMode::update(f32 dt, const PlayInput& input, scene::Scene& scene)
     auto& registry = scene.registry();
     const f32 frameTime = std::min(dt, 0.1f);
 
-    // 1. Heroes: the engine's character controller moves them (a knocked-down hero lies where its
-    //    body is instead).
+    // 1. Heroes: the engine's character controller moves them.
     const gameplay::CharacterInput heroInput{input.move, input.run, input.jump, input.attack, input.cameraYaw};
     for (const entt::entity e : m_heroes) {
         if (!registry.valid(e)) continue;
-        const physanim::PhysicalBody* body = heroBody(e);
-        if (body && body->phase() != physanim::PhysicalBody::Phase::Animated) {
-            if (body->down()) {
-                auto& t = registry.get<scene::TransformComponent>(e);
-                const glm::vec3 root = body->rootPosition(*m_world);
-                t.position.x = root.x;
-                t.position.z = root.z;
-            }
-            if (auto* c = registry.try_get<gameplay::CharacterControllerComponent>(e)) c->velocity = glm::vec3(0.0f);
-            continue;
-        }
         if (input.playAttack >= 0) {
             // Test shortcut: jump straight into attack N of the combo (no need to chain 1..N-1).
             if (auto* animator = registry.try_get<scene::AnimatorComponent>(e); animator && animator->blendTreeActive()) {
@@ -720,7 +715,18 @@ void PlayMode::update(f32 dt, const PlayInput& input, scene::Scene& scene)
                 }
             }
         }
-        gameplay::updateCharacter(scene, e, heroInput, frameTime);
+        gameplay::CharacterInput own = heroInput;
+        for (const auto& b : m_bodies) {
+            // Just bounced off a wall and heading into the guard: a press continues the combo
+            // (from the pose shown now into the next attack), not a fresh first attack.
+            if (b->hero != e || !own.attack || b->bounceNext < 0 || m_time >= b->bounceUntil) continue;
+            if (auto* animator = registry.try_get<scene::AnimatorComponent>(e); animator && animator->blendTreeActive()) {
+                animator->treeState.crossfadeTo(*animator->blendTree, b->bounceNext, kBounceToNext, true);
+                own.attack = false;
+            }
+            b->bounceNext = -1;
+        }
+        gameplay::updateCharacter(scene, e, own, frameTime);
     }
     if (!m_heroes.empty() && registry.valid(m_heroes.front())) {
         const auto& c = registry.get<gameplay::CharacterControllerComponent>(m_heroes.front());
@@ -729,7 +735,12 @@ void PlayMode::update(f32 dt, const PlayInput& input, scene::Scene& scene)
     }
 
     // 2. This frame's animation, so the physics follows the pose that is shown (no frame of lag
-    //    between the simulated bones and the rest of the body).
+    //    between the simulated bones and the rest of the body). Hit stop freezes it.
+    for (const auto& b : m_bodies) {
+        if (auto* animator = registry.valid(b->hero) ? registry.try_get<scene::AnimatorComponent>(b->hero) : nullptr) {
+            animator->timeScale = m_time < b->hitStopEnd ? 0.0f : 1.0f;
+        }
+    }
     scene::evaluateAnimatorPoses(scene, frameTime);
     updateHeroBodies(scene, frameTime);
 
@@ -759,6 +770,8 @@ void PlayMode::update(f32 dt, const PlayInput& input, scene::Scene& scene)
         stepInput.toggleRagdoll = false;
         m_accumulator -= h;
     }
+
+    reactToHardHits(scene);
 
     // 4. The simulated bones go into the final pose (and the weapons attached to them).
     for (const auto& b : m_bodies) {
@@ -826,6 +839,56 @@ void PlayMode::updateHeroBodies(scene::Scene& scene, f32 frameTime)
         static const std::vector<i32> kNone;
         b->body.setTargets(world, animator->animatedModel, frameTime, lead ? lead->physicsJoints : kNone,
                            lead ? lead->physicsStrength : 1.0f);
+    }
+}
+
+void PlayMode::reactToHardHits(scene::Scene& scene)
+{
+    // A blade bouncing off a wall does not swing on through it: the attack freezes for a moment
+    // (hit stop), then the rest of it is no longer a strike but a move from where the wall
+    // stopped it into the start of the combo's next attack (when the attack button is queued, or
+    // pressed shortly after), or else into the guard. No penalty: the combo goes on as usual.
+    // Only walls and obstacles: a blade reaching the ground at the end of a low swing is part of
+    // the attack.
+    constexpr f32 kHitStop = 0.07f;      // s
+    constexpr f32 kGround = 0.7f;        // surface normal.y above this = ground
+    auto& registry = scene.registry();
+    for (const auto& b : m_bodies) {
+        if (!b->body.built() || b->body.hardHits() == b->hardHits || !registry.valid(b->hero)) {
+            continue;
+        }
+        b->hardHits = b->body.hardHits();
+        if (b->body.weaponCount() > 0 && !b->body.hits().empty() && b->body.hits().back().normal.y > kGround) {
+            continue; // the ground
+        }
+        auto* animator = registry.try_get<scene::AnimatorComponent>(b->hero);
+        if (!animator || !animator->blendTreeActive() || !animator->model) {
+            continue;
+        }
+        const anim::BlendTree& tree = *animator->blendTree;
+        const std::vector<i32> chain = anim::attackChain(tree);
+        if (std::ranges::find(chain, animator->treeState.state) == chain.end()) {
+            continue; // not attacking (e.g. the arm still settling after one)
+        }
+        const i32 idleClip = anim::findCombatIdle(animator->model->clips);
+        i32 idle = -1;
+        for (usize s = 0; s < tree.stateMachine.states.size() && idle < 0; ++s) {
+            if (idleClip >= 0 && anim::stateClip(tree, static_cast<i32>(s)) == idleClip) idle = static_cast<i32>(s);
+        }
+        if (idle < 0) idle = tree.stateMachine.defaultState;
+        const auto at = std::ranges::find(chain, animator->treeState.state);
+        const i32 next = chain[static_cast<usize>(std::distance(chain.begin(), at) + 1) % chain.size()];
+        const bool queued = animator->treeState.parameter(tree, "attack") > 0.5f;
+        animator->treeState.setParameter(tree, "attack", 0.0f); // used here (not by the graph)
+        if (queued) {
+            animator->treeState.crossfadeTo(tree, next, kBounceToNext, true);
+            b->bounceNext = -1;
+        } else {
+            animator->treeState.crossfadeTo(tree, idle, kBounceToGuard, true);
+            b->bounceNext = next;
+            b->bounceUntil = m_time + kHitStop + kBounceToGuard + kBounceLate;
+        }
+        b->hitStopEnd = m_time + kHitStop;
     }
 }
 
@@ -945,12 +1008,7 @@ void PlayMode::drawHud(ImDrawList* draw, const ImVec2& p0, const ImVec2& /*size*
         if (const physanim::PhysicalBody* body = heroBody(m_heroes.front())) {
             usize simulated = 0;
             for (usize i = 0; i < body->segmentCount(); ++i) simulated += body->segmentDynamic(i) ? 1 : 0;
-            using P = physanim::PhysicalBody::Phase;
-            if (body->phase() == P::Down) {
-                std::snprintf(text, sizeof(text), "physics body: KNOCKED DOWN (ragdoll)");
-            } else if (body->phase() == P::GettingUp) {
-                std::snprintf(text, sizeof(text), "physics body: getting up");
-            } else if (simulated > 0) {
+            if (simulated > 0) {
                 std::snprintf(text, sizeof(text), "physics body: %zu of %zu bones on muscles", simulated, body->segmentCount());
             } else {
                 std::snprintf(text, sizeof(text), "physics body: animation (this clip has no physics bones)");

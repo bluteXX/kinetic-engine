@@ -68,7 +68,7 @@ void updateAnimatorPoses(Scene& scene, f32 dt)
     finishAnimatorPoses(scene);
 }
 
-void evaluateAnimatorPoses(Scene& scene, f32 dt)
+void evaluateAnimatorPoses(Scene& scene, f32 frameDt)
 {
     auto view = scene.registry().view<AnimatorComponent>();
     for (const entt::entity entity : view) {
@@ -78,6 +78,7 @@ void evaluateAnimatorPoses(Scene& scene, f32 dt)
         }
         const anim::SkinnedModel& model = *a.model;
         const usize jointCount = model.skeleton.jointCount();
+        const f32 dt = frameDt * std::max(a.timeScale, 0.0f);
 
         if (a.bindPose) {
             a.localPose = model.skeleton.restPose();

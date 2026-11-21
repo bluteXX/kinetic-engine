@@ -18,6 +18,7 @@ enum class HitResult : u8 { Pending, Rebound, Glance, Stop, Cut, Stuck };
 [[nodiscard]] const char* hitResultName(HitResult result);
 
 inline constexpr f32 kResultDelay = 0.015f; // s
+inline constexpr f32 kRejoinTime = 0.06f;   // s: contact found again this soon = the same hit
 
 struct Hit {
     f32 time = 0.0f;
@@ -68,7 +69,7 @@ public:
     // Peak muscle loads of the last hit while it is recent (0.3 s).
     void recordLoads(std::span<const f32> loads, f32 time);
     // The blade stopped being simulated: the next contact is a new hit.
-    void reset() { m_inContact = false; m_primed = false; }
+    void reset() { m_inContact = false; m_primed = false; m_lastTouch = -1e9f; }
 
     [[nodiscard]] const std::vector<Hit>& hits() const { return m_hits; }
     [[nodiscard]] bool inContact() const { return m_inContact; }
@@ -78,6 +79,7 @@ private:
     bool m_inContact = false;
     bool m_primed = false; // previous-step blade motion is valid
     bool m_judged = true;  // the last hit has its result
+    f32 m_lastTouch = -1e9f;
     glm::vec3 m_linear{0.0f};
     glm::vec3 m_angular{0.0f};
     glm::vec3 m_center{0.0f};

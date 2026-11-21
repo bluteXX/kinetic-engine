@@ -322,9 +322,29 @@ void BlendTreeInstance::forceState(const BlendTree& tree, i32 s)
     }
     state = s;
     previousState = -1;
+    fromSnapshot = false;
     stateTime = 0.0f;
     transitionElapsed = transitionDuration = 0.0f;
     resetPhase(tree, *this, tree.stateMachine.states[static_cast<usize>(s)].motion, 0);
+}
+
+void BlendTreeInstance::crossfadeTo(const BlendTree& tree, i32 s, f32 duration, bool freeze)
+{
+    prepare(tree);
+    if (!tree.stateMachine.validState(s) || (s == state && !inTransition())) {
+        return;
+    }
+    const i32 from = state;
+    const bool snap = freeze && lastOutput.jointCount() > 0;
+    if (snap) snapshot = lastOutput;
+    forceState(tree, s);
+    if (duration > 0.0f && tree.stateMachine.validState(from)) {
+        previousState = from;
+        transitionDuration = duration;
+        transitionElapsed = 0.0f;
+        fromSnapshot = snap;
+    }
+    lastTransition = -1;
 }
 
 // ---------------------------------------------------------------------------------------------- //
@@ -657,7 +677,7 @@ void updateBlendTree(const BlendTree& tree, std::span<const AnimationClip> clips
         }
     }
     const f32 alpha = instance.inTransition() ? instance.transitionWeight() : 1.0f;
-    if (instance.inTransition()) {
+    if (instance.inTransition() && !instance.fromSnapshot) {
         advance(tree, clips, instance, sm.states[static_cast<usize>(instance.previousState)].motion, dt, 1.0f - alpha,
                 nullptr, 0);
     }
@@ -667,6 +687,7 @@ void updateBlendTree(const BlendTree& tree, std::span<const AnimationClip> clips
         instance.transitionElapsed += dt;
         if (instance.transitionElapsed >= instance.transitionDuration) {
             instance.previousState = -1;
+            instance.fromSnapshot = false;
         }
     }
 }
@@ -682,17 +703,21 @@ void evaluateBlendTree(const BlendTree& tree, const Skeleton& skeleton, std::spa
     const StateMachine& sm = tree.stateMachine;
     if (sm.empty()) {
         evaluateNode(tree, skeleton, clips, instance, tree.root, out, 0);
+        instance.lastOutput = out;
         return;
     }
     if (instance.state < 0) {
         instance.forceState(tree, sm.validState(sm.defaultState) ? sm.defaultState : 0);
     }
     evaluateNode(tree, skeleton, clips, instance, sm.states[static_cast<usize>(instance.state)].motion, out, 0);
-    if (instance.inTransition()) {
+    if (instance.inTransition() && instance.fromSnapshot && instance.snapshot.jointCount() == out.jointCount()) {
+        blendPoses(instance.snapshot, out, instance.transitionWeight(), out);
+    } else if (instance.inTransition()) {
         evaluateNode(tree, skeleton, clips, instance, sm.states[static_cast<usize>(instance.previousState)].motion,
                      instance.transitionPose, 0);
         blendPoses(instance.transitionPose, out, instance.transitionWeight(), out);
     }
+    instance.lastOutput = out;
 }
 
 } // namespace kinetic::anim

@@ -98,6 +98,84 @@ glm::mat4 weaponSocket(const Skeleton& skeleton, i32 hand)
     return glm::inverse(model[static_cast<usize>(hand)]) * socket;
 }
 
+glm::mat4 weaponSocket(const Skeleton& skeleton, i32 hand, std::span<const AnimationClip> clips)
+{
+    const glm::mat4 fallback = weaponSocket(skeleton, hand);
+    if (hand < 0 || static_cast<usize>(hand) >= skeleton.jointCount()) {
+        return fallback;
+    }
+    i32 hold = findCombatIdle(clips);
+    if (hold < 0) {
+        const std::vector<i32> attacks = findAttackClips(clips);
+        hold = attacks.empty() ? -1 : attacks.front();
+    }
+    if (hold < 0) {
+        return fallback;
+    }
+    // Finger chains: the hand's children named index / middle / pinky (or little), down their
+    // first children.
+    const auto chainOf = [&](std::initializer_list<const char*> names) {
+        std::vector<i32> chain;
+        for (usize j = 0; j < skeleton.jointCount() && chain.empty(); ++j) {
+            if (skeleton.parents()[j] != hand) continue;
+            const std::string name = lower(skeleton.names()[j]);
+            if (containsAny(name, names)) chain.push_back(static_cast<i32>(j));
+        }
+        while (!chain.empty() && chain.size() < 4) {
+            i32 next = -1;
+            for (usize j = 0; j < skeleton.jointCount() && next < 0; ++j) {
+                if (skeleton.parents()[j] == chain.back()) next = static_cast<i32>(j);
+            }
+            if (next < 0) break;
+            chain.push_back(next);
+        }
+        return chain;
+    };
+    const std::vector<i32> middle = chainOf({"middle"});
+    const std::vector<i32> index = chainOf({"index"});
+    const std::vector<i32> pinky = chainOf({"pinky", "little"});
+    if (middle.size() < 3 || index.empty() || pinky.empty()) {
+        return fallback;
+    }
+    const AnimationClip& clip = clips[static_cast<usize>(hold)];
+    Pose pose = skeleton.restPose();
+    clip.sample(clip.duration() * 0.5f, false, pose);
+    std::vector<glm::mat4> model(skeleton.jointCount());
+    localToModel(skeleton, pose, model);
+    const auto at = [&](i32 j) { return glm::vec3(model[static_cast<usize>(j)][3]); };
+
+    // The hole of the fist: the circle through the middle finger's first three joints.
+    const glm::vec3 a = at(middle[0]);
+    const glm::vec3 b = at(middle[1]);
+    const glm::vec3 c = at(middle[2]);
+    const glm::vec3 ab = a - c;
+    const glm::vec3 cb = b - c;
+    const glm::vec3 n = glm::cross(ab, cb);
+    const f32 nn = glm::dot(n, n);
+    const f32 span = glm::length(ab) + glm::length(cb);
+    if (nn < 1e-6f * span * span * span * span) {
+        return fallback; // straight fingers: no fist in this clip
+    }
+    const glm::vec3 center = c + glm::cross(glm::dot(ab, ab) * cb - glm::dot(cb, cb) * ab, n) / (2.0f * nn);
+    // Blade: along the hole, out on the index finger's side.
+    glm::vec3 y = glm::normalize(n);
+    if (glm::dot(y, at(index[0]) - at(pinky[0])) < 0.0f) y = -y;
+    // Edge: towards the knuckles (between the first and the second row, along the fingers).
+    glm::vec3 x = (a + b) * 0.5f - center;
+    x -= y * glm::dot(x, y);
+    if (glm::length(x) < 1e-6f) {
+        return fallback;
+    }
+    x = glm::normalize(x);
+    const glm::vec3 z = glm::cross(x, y);
+    glm::mat4 socket(1.0f);
+    socket[0] = glm::vec4(x, 0.0f);
+    socket[1] = glm::vec4(y, 0.0f);
+    socket[2] = glm::vec4(z, 0.0f);
+    socket[3] = glm::vec4(center, 1.0f);
+    return glm::inverse(model[static_cast<usize>(hand)]) * socket;
+}
+
 f32 estimateStrikeTime(const Skeleton& skeleton, const AnimationClip& clip, usize joint)
 {
     constexpr usize kSamples = 90;
@@ -276,7 +354,7 @@ ComboReport addAttackCombo(BlendTree& tree, const Skeleton& skeleton, std::span<
             const i32 t = tree.addTransition(state, rest, settings.blendOut);
             auto& end = tree.stateMachine.transitions[static_cast<usize>(t)];
             end.hasExitTime = true;
-            end.exitTime = 0.92f;
+            end.exitTime = settings.endTime;
         }
     }
     return report;

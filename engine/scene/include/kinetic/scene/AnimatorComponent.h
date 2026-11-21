@@ -23,6 +23,9 @@ struct AnimatorComponent {
     // true: localPose is written by someone else (e.g. a physics simulation) and only skinned;
     // the player is not evaluated.
     bool externalPose = false;
+    // Playback speed of the whole animation (player and blend tree). Gameplay uses it for hit
+    // stop: a blade hitting stone freezes the attack for a few hundredths of a second.
+    f32 timeScale = 1.0f;
 
     // Blend tree (e.g. locomotion: idle / walk / run by speed). Used instead of the player while
     // `useBlendTree` is set. Parameters are set by gameplay (CharacterController) or the editor.

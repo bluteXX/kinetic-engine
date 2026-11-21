@@ -421,8 +421,9 @@ bool PhysicalBody::build(physics::PhysicsWorld& world, const anim::SkinnedModel&
         // Light limbs (a hand) are quicker than heavy ones (a leg, the torso).
         const f32 quick = std::clamp(std::sqrt(0.1f * m_totalMass / std::max(mass, 0.05f)), 1.0f, 2.5f);
         const f32 omega = 2.0f * kPi * settings.frequency * quick;
+        s.grip = std::ranges::any_of(m_weapons, [&](const Weapon& w) { return w.owner == static_cast<i32>(i); });
         s.muscle = physics::Muscle{inertia * omega * omega, 2.0f * settings.dampingRatio * inertia * omega,
-                                   settings.strength * std::sqrt(inertia), true};
+                                   settings.strength * std::sqrt(inertia) * (s.grip ? settings.gripStrength : 1.0f), true};
 
         physics::SwingTwistDesc j;
         j.name = name + " " + model.skeleton.names()[static_cast<usize>(s.joint)];
@@ -444,7 +445,6 @@ bool PhysicalBody::build(physics::PhysicsWorld& world, const anim::SkinnedModel&
         }
     }
     m_hasTargets = true;
-    m_phase = Phase::Animated;
     return true;
 }
 
@@ -453,7 +453,7 @@ bool PhysicalBody::build(physics::PhysicsWorld& world, const anim::SkinnedModel&
 
 bool PhysicalBody::simulated() const
 {
-    return std::ranges::any_of(m_segments, [](const Segment& s) { return s.dynamic; }) || m_phase == Phase::GettingUp;
+    return std::ranges::any_of(m_segments, [](const Segment& s) { return s.dynamic; });
 }
 
 void PhysicalBody::setTargets(const glm::mat4& entityWorld, std::span<const glm::mat4> animatedModel, f32 frameTime,
@@ -499,51 +499,6 @@ void PhysicalBody::syncWeapons(physics::PhysicsWorld& world)
     }
 }
 
-void PhysicalBody::knockDown(physics::PhysicsWorld& world, f32 time)
-{
-    m_phase = Phase::Down;
-    m_phaseStart = time;
-    for (usize i = 0; i < m_segments.size(); ++i) {
-        setSegmentDynamic(world, i, true);
-        if (m_segments[i].constraint.valid()) {
-            physics::Muscle m = m_segments[i].muscle;
-            m.maxTorque *= m_settings.ragdollStrength;
-            m.stiffness *= m_settings.ragdollStrength;
-            world.setMuscle(m_segments[i].constraint, m);
-        }
-    }
-    syncWeapons(world);
-}
-
-void PhysicalBody::getUp(physics::PhysicsWorld& world, f32 time)
-{
-    // Keep the lying pose for the blend, then put the bodies back on the animation.
-    m_frozen.clear();
-    for (const Segment& s : m_segments) {
-        const physics::BodyState& b = world.body(s.body);
-        m_frozen.push_back(compose(b.position, b.rotation, s.scale));
-    }
-    for (usize i = 0; i < m_segments.size(); ++i) {
-        setSegmentDynamic(world, i, false);
-        Segment& s = m_segments[i];
-        world.teleport(s.body, s.target.position, s.target.rotation);
-        s.previous = s.target;
-        if (s.constraint.valid()) {
-            physics::Muscle m = s.muscle;
-            m.enabled = false;
-            world.setMuscle(s.constraint, m);
-        }
-    }
-    syncWeapons(world);
-    for (Weapon& w : m_weapons) {
-        const Segment& o = m_segments[static_cast<usize>(w.owner)];
-        world.teleport(w.body, o.target.position + o.target.rotation * w.inOwner.position, o.target.rotation * w.inOwner.rotation);
-    }
-    m_phase = Phase::GettingUp;
-    m_phaseStart = time;
-    m_getUpWeight = 1.0f;
-}
-
 void PhysicalBody::assist(physics::PhysicsWorld& world, f32 dt, f32 alpha)
 {
     // Balance assist: the pelvis is pulled towards its animated place with limited force (it
@@ -578,26 +533,10 @@ void PhysicalBody::step(physics::PhysicsWorld& world, f32 dt, f32 alpha, f32 tim
     if (!built() || !m_hasTargets) {
         return;
     }
-    if (m_phase == Phase::Down) {
-        if (time - m_phaseStart >= m_settings.downTime) {
-            getUp(world, time);
-        }
-        return; // a ragdoll: nothing drives it
-    }
-    if (m_phase == Phase::GettingUp) {
-        const f32 x = std::clamp((time - m_phaseStart) / std::max(m_settings.getUpTime, 1e-3f), 0.0f, 1.0f);
-        m_getUpWeight = 1.0f - x * x * (3.0f - 2.0f * x);
-        if (x >= 1.0f) {
-            m_phase = Phase::Animated;
-            m_frozen.clear();
-        }
-    }
-
-    // Which bodies are simulated (getting up: none, the pose blends instead).
+    // Which bodies are simulated.
     for (usize i = 0; i < m_segments.size(); ++i) {
         Segment& s = m_segments[i];
-        const bool wanted = s.wanted && m_phase == Phase::Animated;
-        if (wanted) {
+        if (s.wanted) {
             if (!s.dynamic) {
                 setSegmentDynamic(world, i, true);
             }
@@ -653,15 +592,21 @@ void PhysicalBody::step(physics::PhysicsWorld& world, f32 dt, f32 alpha, f32 tim
             animated = glm::normalize(glm::slerp(glm::quat(1.0f, 0.0f, 0.0f, 0.0f), delta, lead) * animated);
         }
         glm::quat target = animated;
+        const glm::quat current = glm::normalize(glm::inverse(world.body(p.body).rotation) * world.body(s.body).rotation);
+        const glm::quat pose = glm::normalize(glm::inverse(p.target.rotation) * s.target.rotation);
+        const f32 limit = s.grip ? m_settings.wristLimit : m_settings.jointLimit;
+        const f32 bent = angleOf(current * glm::inverse(pose));
         const f32 sinceReflex = time - s.reflexStart;
-        if (sinceReflex < m_settings.reflexTime) {
+        if (bent > limit) {
+            // Past the ligaments: back onto the animation, and much harder than a muscle could.
+            m.maxTorque *= 1.0f + m_settings.ligamentStiffness * (bent - limit) / limit;
+        } else if (sinceReflex < m_settings.reflexTime) {
             m.maxTorque *= m_settings.reflexStrength; // yielding to the hit
             target = glm::normalize(glm::inverse(world.body(p.body).rotation) * world.body(s.body).rotation);
         } else if (sinceReflex < m_settings.reflexTime + m_settings.recoverTime) {
             // Back onto the animation, from where the hit left it.
             const f32 x = std::clamp((sinceReflex - m_settings.reflexTime) / m_settings.recoverTime, 0.0f, 1.0f);
             const f32 w = m_settings.hold + (1.0f - m_settings.hold) * x * x * (3.0f - 2.0f * x);
-            const glm::quat current = glm::normalize(glm::inverse(world.body(p.body).rotation) * world.body(s.body).rotation);
             target = glm::slerp(current, glm::dot(current, animated) < 0.0f ? -animated : animated, w);
         }
         world.setMuscle(s.constraint, m);
@@ -674,20 +619,9 @@ void PhysicalBody::step(physics::PhysicsWorld& world, f32 dt, f32 alpha, f32 tim
         world.moveKinematic(w.body, o.driven.position + o.driven.rotation * w.inOwner.position, o.driven.rotation * w.inOwner.rotation, dt);
     }
 
-    // Full body: the balance assist, and falling over when held back too far.
-    if (m_segments.front().dynamic && m_phase == Phase::Animated) {
+    // Full body: the balance assist (it never gives up: no falling over).
+    if (m_segments.front().dynamic) {
         assist(world, dt, alpha);
-        const physics::BodyState& b = world.body(m_segments.front().body);
-        const Target t = interpolated(m_segments.front(), alpha);
-        const bool off = glm::length(b.position - t.position) > m_settings.knockdownDistance * m_worldHeight ||
-                         angleOf(t.rotation * glm::inverse(b.rotation)) > m_settings.knockdownAngle;
-        m_offBalance = off ? m_offBalance + dt : 0.0f;
-        if (m_offBalance > 0.05f) {
-            m_offBalance = 0.0f;
-            knockDown(world, time);
-        }
-    } else {
-        m_offBalance = 0.0f;
     }
 }
 
@@ -709,10 +643,11 @@ void PhysicalBody::afterStep(physics::PhysicsWorld& world, const SurfaceMap& sur
             events->push_back(HitEvent{h.time, h.point, h.normal, h.velocityBefore, h.material, h.soft, h.targetBody, w.body.index});
         }
         // A hard hit (rebound / stop) or a stuck blade: the arm yields, then recovers.
-        if (e.judged && (e.result == HitResult::Rebound || e.result == HitResult::Stop || e.result == HitResult::Stuck) &&
-            m_phase == Phase::Animated) {
+        if (e.judged && (e.result == HitResult::Rebound || e.result == HitResult::Stop || e.result == HitResult::Stuck)) {
+            ++m_hardHits;
             for (const i32 s : w.chain) {
                 Segment& seg = m_segments[static_cast<usize>(s)];
+                if (seg.grip) continue; // the wrist keeps its grip; the elbow and shoulder give
                 if (seg.dynamic && time - seg.reflexStart > m_settings.reflexTime) seg.reflexStart = time;
             }
         }
@@ -728,14 +663,6 @@ void PhysicalBody::writeOverrides(const physics::PhysicsWorld& world, const glm:
     const glm::mat4 toModel = glm::inverse(entityWorld);
     animator.overrideAnchor = -1;
     animator.boneOverrides.clear();
-    if (m_phase == Phase::GettingUp) {
-        // From the lying pose back to the animation.
-        animator.overrideWeight = m_getUpWeight;
-        for (usize i = 0; i < m_segments.size() && i < m_frozen.size(); ++i) {
-            animator.boneOverrides.push_back({m_segments[i].joint, toModel * m_frozen[i]});
-        }
-        return;
-    }
     animator.overrideWeight = 1.0f;
     for (const Segment& s : m_segments) {
         // Simulated bodies and kinematic ones riding on them: where the physics has them.

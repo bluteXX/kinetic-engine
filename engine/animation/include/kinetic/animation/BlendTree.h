@@ -165,6 +165,11 @@ struct BlendTreeInstance {
     f32 transitionElapsed = 0.0f;
     f32 transitionDuration = 0.0f;
     i32 lastTransition = -1;     // index of the transition that fired last (UI)
+    // crossfadeTo(..., freeze): the crossfade starts from `snapshot`, the pose shown at that
+    // moment (it holds still instead of playing on, and can be re-aimed mid-blend without a pop).
+    bool fromSnapshot = false;
+    Pose snapshot;
+    Pose lastOutput;             // the last evaluated pose
 
     // Sizes everything for `tree` and sets parameters to their defaults (if the count changed).
     void prepare(const BlendTree& tree);
@@ -184,6 +189,11 @@ struct BlendTreeInstance {
     }
     // Jumps to a state immediately (editor preview).
     void forceState(const BlendTree& tree, i32 state);
+    // Crossfades into `state` over `duration` s from gameplay, outside the graph's transitions
+    // (e.g. an attack interrupted by its blade hitting a wall). With `freeze` the state faded
+    // out of holds the pose last shown (the swing stops where it was stopped) instead of playing
+    // on; calling it again mid-blend starts the new crossfade from the pose shown then.
+    void crossfadeTo(const BlendTree& tree, i32 state, f32 duration, bool freeze = false);
 };
 
 // Advances clocks and the state machine by dt and refreshes node weights.

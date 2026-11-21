@@ -23,13 +23,16 @@ namespace kinetic::anim {
 // The strike moment of each clip is found from its weapon hand's peak speed.
 
 struct ComboSettings {
-    f32 inputBuffer = 0.6f;    // s a press waits for the combo window
+    f32 inputBuffer = 1.2f;    // s a press waits for the combo window (long enough for a press
+                               // anywhere in the swing to carry into the next attack)
     f32 comboDelay = 0.05f;    // earliest combo window, normalised time after the strike; the
                                // window opens at the best-matching pose after that (see below)
     f32 recoveryDelay = 0.3f;  // normalised time after the strike when moving may cancel
     f32 blendIn = 0.15f;       // s crossfade from locomotion / idle into the first attack
     f32 comboBlend = 0.22f;    // s crossfade from one attack into the next
     f32 blendOut = 0.3f;       // s crossfade from an attack into the combat idle
+    f32 endTime = 0.97f;       // normalised time an attack without input starts fading into the
+                               // combat idle (the combo window stays open until then)
     f32 cancelBlend = 0.45f;   // s crossfade when moving cancels the recovery (no snapping)
     f32 turnWindow = 0.15f;    // s at the start of an attack the character may still turn
     f32 combatIdleTime = 3.0f; // cycles of combat idle before relaxing into locomotion
@@ -56,6 +59,11 @@ struct ComboSettings {
 // finger roots), +Y along the blade (the thumb side, perpendicular to the fingers), +X along the
 // fingers. Uses the rest pose; identity if the hand has no finger / thumb joints.
 [[nodiscard]] glm::mat4 weaponSocket(const Skeleton& skeleton, i32 hand);
+// The same from a pose that holds the weapon (the combat idle, else the first attack): the grip
+// goes through the fist - the middle finger curls around it, so the circle through its joints is
+// the hole - along the fist (index side = blade, little finger side = pommel), the edge facing
+// the knuckles. Falls back to the rest-pose socket when no clip curls the fingers.
+[[nodiscard]] glm::mat4 weaponSocket(const Skeleton& skeleton, i32 hand, std::span<const AnimationClip> clips);
 
 struct ComboReport {
     std::vector<i32> attackStates;

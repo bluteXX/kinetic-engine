@@ -16,7 +16,7 @@ scene     -> animation             EnTT registry + components (AnimatorComponent
                                    raycasts, the pose stage of animation (AnimatorSystem)
 physics   -> core                  Jolt Physics behind PhysicsWorld (pimpl, no Jolt headers leak)
 gameplay  -> scene                 character controller (kinematic, walks on colliders)
-physanim  -> scene, physics        physics animation: bones on muscles per clip, hits, knockdown
+physanim  -> scene, physics        physics animation: bones on muscles per clip, hits
 vfx       -> core                  particle effects from assets/vfx/*.vfx (hit sparks, splinters...)
 platform  -> core                  SDL3 window / input
 gfx       -> platform              SDL_GPU device, shaders, frame lifecycle
@@ -105,8 +105,10 @@ events ─► fixed update ×N ─► update ─► ImGui ─► render
   follow the animation (~30 ms ahead), the rest stay animated (riding on simulated parents). Weapon
   hits are judged by `HitTracker` (rebound / glance / stop / cut / stuck), hard ones trigger a
   reflex, and each one sends a `HitEvent` ("on hit"). With the pelvis simulated a force-limited
-  balance assist holds the body on the animation; held back too far (a wall, a stone) it is knocked
-  down (ragdoll), then gets back up. The result goes back as `AnimatorComponent::boneOverrides`
+  balance assist holds the body on the animation (it never falls over). In Play a hard hit on a
+  wall gives a hit stop, then the rest of the attack becomes a crossfade (from the pose shown, see
+  `BlendTreeInstance::crossfadeTo`) into the combo's next attack when one is queued, else into the
+  combat idle; the ground does not interrupt an attack. The result goes back as `AnimatorComponent::boneOverrides`
   (model space, blendable with `overrideWeight`). Play mode evaluates the animation before the
   physics (`scene::evaluateAnimatorPoses` / `finishAnimatorPoses`), so the drawn bones and weapons
   are the simulated ones in the same frame. `findStrikePoint` / `strikeTarget` place test targets

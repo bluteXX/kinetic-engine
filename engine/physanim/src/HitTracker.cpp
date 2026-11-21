@@ -65,7 +65,10 @@ HitTracker::Events HitTracker::update(const physics::PhysicsWorld& world, physic
     // Rigid contacts are also seen through the momentum balance.
     touching = touching || (blade.inContact && glm::length(blade.contactForce) > 1.0f);
 
-    if (touching && !m_inContact && m_primed) {
+    // A blade chattering on a surface (contact lost and found again within a few steps) is still
+    // the same hit: otherwise every bounce starts a new one and none of them is ever judged.
+    const bool sameHit = !m_hits.empty() && other != ~0u && m_hits.back().targetBody == other && time - m_lastTouch < kRejoinTime;
+    if (touching && !m_inContact && m_primed && !sameHit) {
         Hit hit;
         hit.time = time;
         hit.soft = soft;
@@ -95,6 +98,7 @@ HitTracker::Events HitTracker::update(const physics::PhysicsWorld& world, physic
         m_judged = false;
     }
     m_inContact = touching;
+    if (touching) m_lastTouch = time;
 
     if (!m_hits.empty() && time - m_hits.back().time < 0.3f) {
         Hit& hit = m_hits.back();
