@@ -1,0 +1,12 @@
+// Steel on steel: a bright shower of sparks.
+{
+  "name": "Metal hit",
+  "emitters": [
+    { "name": "sparks", "shape": "spark", "count": 32, "color": [1.0, 0.85, 0.45],
+      "size": [0.0025, 0.005], "speed": [4.0, 9.0], "spread": 75, "slide": 0.7, "inherit": 0.25,
+      "lifetime": [0.15, 0.45], "gravity": 1.0, "drag": 1.2, "stretch": 0.015, "bounce": 0.5 },
+    { "name": "flash", "shape": "puff", "count": 3, "color": [1.0, 0.95, 0.8],
+      "size": [0.015, 0.025], "grow": 2.0, "speed": [0.0, 0.2], "spread": 90,
+      "lifetime": [0.05, 0.09], "gravity": 0.0, "drag": 0.0, "scaleWithSpeed": false }
+  ]
+}

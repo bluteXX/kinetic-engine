@@ -1,0 +1,12 @@
+// Blade into flesh: dark red droplets.
+{
+  "name": "Flesh hit",
+  "emitters": [
+    { "name": "drops", "shape": "drop", "count": 18, "color": [0.55, 0.03, 0.03],
+      "size": [0.004, 0.009], "speed": [1.0, 3.5], "spread": 50, "slide": 0.6, "inherit": 0.2,
+      "lifetime": [0.4, 0.8], "gravity": 1.0, "drag": 0.3, "stretch": 0.01, "bounce": 0.0 },
+    { "name": "mist", "shape": "puff", "count": 4, "color": [0.45, 0.04, 0.04],
+      "size": [0.01, 0.02], "grow": 2.5, "speed": [0.2, 0.6], "spread": 60,
+      "lifetime": [0.2, 0.35], "gravity": 0.2, "drag": 3.0, "scaleWithSpeed": false }
+  ]
+}

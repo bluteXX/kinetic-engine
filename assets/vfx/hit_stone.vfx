@@ -1,0 +1,15 @@
+// Sword on stone: a few orange sparks and grey grit with a puff of dust.
+{
+  "name": "Stone hit",
+  "emitters": [
+    { "name": "sparks", "shape": "spark", "count": 14, "color": [1.0, 0.72, 0.35],
+      "size": [0.003, 0.006], "speed": [3.0, 7.0], "spread": 65, "slide": 0.6, "inherit": 0.15,
+      "lifetime": [0.12, 0.3], "gravity": 1.0, "drag": 1.5, "stretch": 0.012 },
+    { "name": "grit", "shape": "shard", "count": 10, "color": [0.52, 0.5, 0.47],
+      "size": [0.006, 0.014], "speed": [1.0, 3.0], "spread": 70, "slide": 0.3,
+      "lifetime": [0.5, 0.9], "gravity": 1.0, "drag": 0.4, "spin": 14, "bounce": 0.3 },
+    { "name": "dust", "shape": "puff", "count": 6, "color": [0.68, 0.66, 0.62],
+      "size": [0.02, 0.04], "grow": 3.5, "speed": [0.3, 0.8], "spread": 80,
+      "lifetime": [0.5, 0.8], "gravity": -0.03, "drag": 2.5, "scaleWithSpeed": false }
+  ]
+}

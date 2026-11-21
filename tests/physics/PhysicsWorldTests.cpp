@@ -5,6 +5,9 @@
 
 #include <glm/gtc/quaternion.hpp>
 
+#include <algorithm>
+#include <cmath>
+
 using namespace kinetic;
 using namespace kinetic::physics;
 
@@ -207,4 +210,167 @@ TEST_CASE("Kinematic bodies follow targets, switch to dynamic, swing-twist joint
     world.setMotionType(parent, MotionType::Dynamic);
     world.teleport(parent, {3.0f, 5.0f, 0.0f}, glm::quat(1, 0, 0, 0));
     CHECK(world.body(parent).position.x == doctest::Approx(3.0f));
+}
+
+namespace {
+
+// A rod hanging from a static anchor on a ball joint (twist axis down), with a 3-axis muscle.
+struct BallArm {
+    PhysicsWorld world;
+    BodyId anchor;
+    BodyId rod;
+    JointId shoulder;
+
+    BallArm(const Muscle& muscle, const glm::vec3& gravity)
+    {
+        REQUIRE(world.init());
+        world.setGravity(gravity);
+        BodyDesc a;
+        a.shape.halfExtents = glm::vec3(0.05f);
+        a.position = {0.0f, 2.0f, 0.0f};
+        a.motion = MotionType::Static;
+        a.collisionGroup = 3;
+        anchor = world.addBody(a);
+
+        BodyDesc r;
+        r.shape.type = ShapeType::Capsule;
+        r.shape.radius = 0.04f;
+        r.shape.halfHeight = 0.2f;
+        r.shape.offset = {0.0f, -0.25f, 0.0f};
+        r.position = {0.0f, 2.0f, 0.0f};
+        r.mass = 2.0f;
+        r.collisionGroup = 3;
+        rod = world.addBody(r);
+
+        SwingTwistDesc j;
+        j.parent = anchor;
+        j.child = rod;
+        j.anchor = {0.0f, 2.0f, 0.0f};
+        j.normalHalfCone = 1.5f;
+        j.planeHalfCone = 1.5f;
+        j.twistMin = -1.2f;
+        j.twistMax = 1.2f;
+        j.muscle = muscle;
+        shoulder = world.addSwingTwist(j);
+        REQUIRE(shoulder.valid());
+    }
+
+    void run(f32 seconds)
+    {
+        for (int i = 0; i < static_cast<int>(seconds / kDt); ++i) {
+            world.step(kDt);
+        }
+    }
+
+    // Angle (rad) between the rod's rotation and `target`.
+    [[nodiscard]] f32 error(const glm::quat& target) const
+    {
+        const glm::quat d = glm::normalize(world.body(rod).rotation * glm::inverse(target));
+        return 2.0f * std::acos(std::min(1.0f, std::abs(d.w)));
+    }
+};
+
+// Lowest y of a vertical blade's edge after falling `height` onto a static block (top at y = 0).
+struct BladeDrop {
+    f32 deepest = 0.0f;  // m below the block's top (positive = inside)
+    f32 restDepth = 0.0f; // after it settled
+    f32 speedAfter = 0.0f; // 50 ms after the first touch
+};
+
+BladeDrop dropBlade(f32 blockHardness, bool sharp, f32 height = 2.0f)
+{
+    PhysicsWorld world;
+    REQUIRE(world.init());
+    world.setGravity({0.0f, -kG, 0.0f});
+
+    BodyDesc block;
+    block.shape.halfExtents = {0.5f, 0.25f, 0.5f};
+    block.position = {0.0f, -0.25f, 0.0f};
+    block.motion = MotionType::Static;
+    block.hardness = blockHardness;
+    world.addBody(block);
+
+    constexpr f32 kHalf = 0.2f;
+    BodyDesc blade;
+    blade.shape.halfExtents = {0.02f, kHalf, 0.005f};
+    blade.position = {0.0f, height + kHalf, 0.0f};
+    blade.mass = 2.0f;
+    blade.sharp = sharp;
+    const BodyId b = world.addBody(blade);
+
+    BladeDrop out;
+    bool touched = false;
+    f32 sinceTouch = 0.0f;
+    for (int i = 0; i < static_cast<int>(1.5f / kDt); ++i) {
+        world.step(kDt);
+        const BodyState& s = world.body(b);
+        const f32 edge = (s.position + s.rotation * glm::vec3(0.0f, -kHalf, 0.0f)).y;
+        out.deepest = std::max(out.deepest, -edge);
+        if (!touched && edge < 0.0f) touched = true;
+        if (touched) {
+            sinceTouch += kDt;
+            if (sinceTouch <= 0.05f) out.speedAfter = glm::length(s.linearVelocity);
+        }
+        out.restDepth = -edge;
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("A 3-axis muscle on a ball joint drives the bone to its target rotation")
+{
+    BallArm arm(Muscle{400.0f, 30.0f, 200.0f, true}, glm::vec3(0.0f));
+    // Swing forward 50 deg, out 20 deg, twist 30 deg: a real 3D motion.
+    const glm::quat target = glm::angleAxis(glm::radians(50.0f), glm::vec3(1, 0, 0)) *
+                             glm::angleAxis(glm::radians(20.0f), glm::vec3(0, 0, 1)) *
+                             glm::angleAxis(glm::radians(30.0f), glm::vec3(0, 1, 0));
+    CHECK(arm.error(target) > glm::radians(40.0f));
+    arm.world.setTargetRotation(arm.shoulder, target);
+    arm.run(2.0f);
+    CHECK(arm.error(target) < glm::radians(3.0f));
+    CHECK(glm::length(arm.world.body(arm.rod).angularVelocity) < 0.05f); // settled, not oscillating
+
+    // Back to the rest pose.
+    arm.world.setTargetRotation(arm.shoulder, glm::quat(1, 0, 0, 0));
+    arm.run(2.0f);
+    CHECK(arm.error(glm::quat(1, 0, 0, 0)) < glm::radians(3.0f));
+}
+
+TEST_CASE("A 3-axis muscle is limited by its strength")
+{
+    // Target: arm straight out in front (90 deg). Holding it needs m g d = 2 * 9.81 * 0.25 = 4.9 N m.
+    const glm::quat target = glm::angleAxis(glm::radians(90.0f), glm::vec3(1, 0, 0));
+    BallArm strong(Muscle{800.0f, 40.0f, 100.0f, true}, {0.0f, -kG, 0.0f});
+    strong.world.setTargetRotation(strong.shoulder, target);
+    strong.run(2.0f);
+    BallArm weak(Muscle{800.0f, 40.0f, 2.0f, true}, {0.0f, -kG, 0.0f});
+    weak.world.setTargetRotation(weak.shoulder, target);
+    weak.run(2.0f);
+    CHECK(strong.error(target) < glm::radians(5.0f));
+    CHECK(weak.error(target) > glm::radians(45.0f)); // 2 N m cannot lift it past ~24 deg
+}
+
+TEST_CASE("A blade cuts into soft materials and is stopped by hard ones")
+{
+    const BladeDrop flesh = dropBlade(0.25f, true);
+    const BladeDrop dirt = dropBlade(0.45f, true);
+    const BladeDrop wood = dropBlade(0.75f, true);
+    const BladeDrop stone = dropBlade(1.0f, true);
+    const BladeDrop bluntOnFlesh = dropBlade(0.25f, false);
+    MESSAGE("deepest cut (cm): flesh " << flesh.deepest * 100.0f << ", dirt " << dirt.deepest * 100.0f << ", wood "
+                                       << wood.deepest * 100.0f << ", stone " << stone.deepest * 100.0f
+                                       << ", blunt on flesh " << bluntOnFlesh.deepest * 100.0f);
+
+    // Soft: the blade sinks in, and the softer the material the deeper.
+    CHECK(flesh.deepest > 0.04f);
+    CHECK(flesh.deepest > dirt.deepest);
+    CHECK(dirt.deepest > 0.025f);
+    // ...but is slowed down by the material's resistance and comes to rest inside, not falling through.
+    CHECK(flesh.speedAfter < 3.0f);
+    CHECK(flesh.restDepth < 0.25f);
+    // Hard (wood is above the cutting threshold) and blunt contacts are rigid: at most Jolt's slop.
+    CHECK(wood.deepest < 0.025f);
+    CHECK(stone.deepest < 0.025f);
+    CHECK(bluntOnFlesh.deepest < 0.025f);
 }

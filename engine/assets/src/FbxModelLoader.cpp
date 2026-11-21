@@ -144,6 +144,12 @@ void appendMesh(const ufbx_node& node, JointBuilder& joints, anim::SkinnedMesh& 
             const f32 length = glm::length(normal);
             normal = length > 1e-8f ? normal / length : glm::vec3(0.0f, 1.0f, 0.0f);
 
+            glm::vec2 uv(0.0f);
+            if (mesh.vertex_uv.exists) {
+                const ufbx_vec2 t = ufbx_get_vertex_vec2(&mesh.vertex_uv, corner);
+                uv = glm::vec2(static_cast<f32>(t.x), 1.0f - static_cast<f32>(t.y)); // FBX v points up
+            }
+
             glm::uvec4 influenceJoints(0u);
             glm::vec4 influenceWeights(0.0f);
             if (skin) {
@@ -166,6 +172,7 @@ void appendMesh(const ufbx_node& node, JointBuilder& joints, anim::SkinnedMesh& 
             out.mesh.indices.push_back(static_cast<u32>(out.mesh.positions.size()));
             out.mesh.positions.push_back(glm::vec3(geometryToBindWorld * glm::vec4(position, 1.0f)));
             out.mesh.normals.push_back(normal);
+            out.mesh.uvs.push_back(uv);
             out.joints.push_back(influenceJoints);
             out.weights.push_back(influenceWeights);
         }
@@ -233,6 +240,50 @@ std::vector<anim::AnimationClip> bakeClips(const ufbx_scene& scene, const JointB
 
 } // namespace
 
+namespace {
+
+std::filesystem::path texturePath(const ufbx_texture* texture)
+{
+    if (!texture) {
+        return {};
+    }
+    for (const ufbx_string& s : {texture->relative_filename, texture->filename, texture->absolute_filename}) {
+        if (s.length > 0) {
+            return std::filesystem::path(std::string(s.data, s.length));
+        }
+    }
+    return {};
+}
+
+} // namespace
+
+// First material of the file's meshes that has a texture (or else the first one at all).
+// Paths are as written in the file; ModelLoader resolves them.
+MaterialDesc readFbxMaterial(const ufbx_scene& scene)
+{
+    MaterialDesc result;
+    bool found = false;
+    for (const ufbx_material* m : scene.materials) {
+        MaterialDesc d;
+        d.name = std::string(m->name.data, m->name.length);
+        const ufbx_texture* base = m->pbr.base_color.texture ? m->pbr.base_color.texture : m->fbx.diffuse_color.texture;
+        const ufbx_texture* normal = m->pbr.normal_map.texture ? m->pbr.normal_map.texture : m->fbx.normal_map.texture;
+        d.baseColorTexture = texturePath(base);
+        d.normalTexture = texturePath(normal);
+        d.roughnessTexture = texturePath(m->pbr.roughness.texture);
+        d.metallicTexture = texturePath(m->pbr.metalness.texture);
+        if (m->pbr.base_color.has_value && !base) {
+            const ufbx_vec4 c = m->pbr.base_color.value_vec4;
+            d.baseColorFactor = glm::vec4(static_cast<f32>(c.x), static_cast<f32>(c.y), static_cast<f32>(c.z), 1.0f);
+        }
+        if (!found || (!result.hasTextures() && d.hasTextures())) {
+            result = std::move(d);
+            found = true;
+        }
+    }
+    return result;
+}
+
 std::optional<anim::SkinnedModel> loadSkinnedModelFbx(const std::filesystem::path& path, std::string& error)
 {
     ufbx_load_opts opts{};
@@ -294,6 +345,7 @@ std::optional<anim::SkinnedModel> loadSkinnedModelFbx(const std::filesystem::pat
         inverseBind.push_back(glm::inverse(joints.bindWorld[j]));
     }
 
+    model.skin.mesh.material = readFbxMaterial(*scene);
     model.clips = bakeClips(*scene, joints);
     if (!hasSkin && model.clips.empty()) {
         error = "file has no skin and no animation"; // e.g. an empty default take
@@ -302,6 +354,57 @@ std::optional<anim::SkinnedModel> loadSkinnedModelFbx(const std::filesystem::pat
     model.isBone = joints.isBone;
     model.skeleton = anim::Skeleton(std::move(names), std::move(parents), std::move(restPose), std::move(inverseBind));
     return model;
+}
+
+std::optional<SkeletalAnimationAsset> loadAnimationFbx(const std::filesystem::path& path, std::string& error)
+{
+    ufbx_load_opts opts{};
+    opts.target_axes = ufbx_axes_right_handed_y_up;
+    opts.target_unit_meters = 1.0;
+    opts.space_conversion = UFBX_SPACE_CONVERSION_TRANSFORM_ROOT;
+
+    ufbx_error ufbxError{};
+    const std::unique_ptr<ufbx_scene, SceneDeleter> scene(ufbx_load_file(path.string().c_str(), &opts, &ufbxError));
+    if (!scene) {
+        error = errorString(ufbxError);
+        return std::nullopt;
+    }
+    // Joints: every bone node (and its ancestors, for the axis / unit conversion on the root).
+    JointBuilder joints;
+    for (const ufbx_node* node : scene->nodes) {
+        if (node->bone) {
+            joints.add(node);
+        }
+    }
+    if (joints.nodes.empty()) {
+        error = "file has no skeleton";
+        return std::nullopt;
+    }
+    std::vector<std::string> names;
+    std::vector<i32> parents;
+    anim::Pose restPose(joints.nodes.size());
+    for (usize j = 0; j < joints.nodes.size(); ++j) {
+        const ufbx_node* node = joints.nodes[j];
+        std::string name(node->name.data, node->name.length);
+        names.push_back(name.empty() ? (node->is_root ? "Root" : "node_" + std::to_string(j)) : std::move(name));
+        const usize* parent = node->parent ? joints.find(node->parent) : nullptr;
+        parents.push_back(parent ? static_cast<i32>(*parent) : anim::kNoParent);
+        // Rest pose: the nodes as stored in the file (Mixamo / most exporters: the T-pose).
+        const glm::mat4 local = parent ? glm::inverse(joints.bindWorld[*parent]) * joints.bindWorld[j] : joints.bindWorld[j];
+        anim::JointTransform t;
+        glm::vec3 skew;
+        glm::vec4 perspective;
+        glm::decompose(local, t.scale, t.rotation, t.translation, skew, perspective);
+        restPose.set(j, t);
+    }
+    SkeletalAnimationAsset asset;
+    asset.clips = bakeClips(*scene, joints);
+    if (asset.clips.empty()) {
+        error = "file has no animation";
+        return std::nullopt;
+    }
+    asset.skeleton = anim::Skeleton(std::move(names), std::move(parents), std::move(restPose));
+    return asset;
 }
 
 } // namespace kinetic::assets::detail

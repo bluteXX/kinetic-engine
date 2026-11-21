@@ -6,6 +6,9 @@ out/
 # Dependency cache (CPM)
 .cpm-cache/
 
+# Local tool downloads (e.g. glslang for tools/compile_shaders.py)
+.tools/
+
 # IDEs
 .idea/
 .vscode/

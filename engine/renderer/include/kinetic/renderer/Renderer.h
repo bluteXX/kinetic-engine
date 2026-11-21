@@ -1,5 +1,6 @@
 #pragma once
 
+#include "kinetic/core/Image.h"
 #include "kinetic/core/MeshData.h"
 #include "kinetic/gfx/Device.h"
 #include "kinetic/scene/Scene.h"
@@ -8,14 +9,18 @@
 
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace kinetic::renderer {
 
 // One uploaded mesh in the renderer's library. Its index is the scene::MeshId.
+// Vertex streams: 0 = position, normal, tangent (rewritten every frame for skinned meshes),
+// 1 = texture coordinates (static).
 struct GpuMesh {
     std::string name;
     SDL_GPUBuffer* vertexBuffer = nullptr;
+    SDL_GPUBuffer* uvBuffer = nullptr;
     SDL_GPUBuffer* indexBuffer = nullptr;
     u32 indexCount = 0;
     u32 vertexCount = 0;
@@ -32,6 +37,16 @@ struct GpuMesh {
     std::vector<u32> indices;
 
     [[nodiscard]] bool alive() const { return vertexBuffer != nullptr; }
+};
+
+// One uploaded texture in the renderer's library. Its index is the scene::TextureId.
+struct GpuTexture {
+    std::string name; // usually the source file path (used to share textures between assets)
+    SDL_GPUTexture* texture = nullptr;
+    u32 width = 0;
+    u32 height = 0;
+
+    [[nodiscard]] bool alive() const { return texture != nullptr; }
 };
 
 enum class MeshUsage : u8 {
@@ -83,13 +98,29 @@ public:
     scene::MeshId addMesh(std::string name, const MeshData& data, MeshUsage usage = MeshUsage::Static);
     // Replaces the vertices of a dynamic mesh (same count as when it was added). The data is
     // staged now and copied to the GPU at the start of the next frame (uploadPendingData).
-    bool updateMeshVertices(scene::MeshId id, std::span<const glm::vec3> positions, std::span<const glm::vec3> normals);
+    // Without tangents the mesh keeps a default tangent frame (no normal mapping).
+    bool updateMeshVertices(scene::MeshId id, std::span<const glm::vec3> positions, std::span<const glm::vec3> normals,
+                            std::span<const glm::vec4> tangents = {});
     // Releases a mesh's GPU buffers. The id stays reserved (mesh(id) returns null afterwards).
     void removeMesh(scene::MeshId id);
     [[nodiscard]] const std::vector<GpuMesh>& meshes() const { return m_meshes; }
     [[nodiscard]] const GpuMesh* mesh(scene::MeshId id) const
     {
         return id < m_meshes.size() && m_meshes[id].alive() ? &m_meshes[id] : nullptr;
+    }
+
+    // --- Texture library ----------------------------------------------------------------------
+    // Uploads an RGBA image with a full mip chain and returns its id (kInvalidTexture on failure).
+    // Ids 0 / 1 are the built-in white and flat-normal textures (scene::kWhiteTexture /
+    // scene::kFlatNormalTexture).
+    static constexpr scene::TextureId kInvalidTexture = ~scene::TextureId{0};
+    scene::TextureId addTexture(std::string name, const ImageData& image);
+    // Texture previously added under `name`, or kInvalidTexture.
+    [[nodiscard]] scene::TextureId findTexture(std::string_view name) const;
+    [[nodiscard]] const std::vector<GpuTexture>& textures() const { return m_textures; }
+    [[nodiscard]] const GpuTexture* texture(scene::TextureId id) const
+    {
+        return id < m_textures.size() && m_textures[id].alive() ? &m_textures[id] : nullptr;
     }
 
     // --- Debug overlay ------------------------------------------------------------------------
@@ -137,6 +168,7 @@ public:
 private:
     bool createPipelines();
     bool createGrid();
+    bool createTextureDefaults();
 
     gfx::Device* m_device = nullptr;
     SDL_GPUGraphicsPipeline* m_trianglePipeline = nullptr;
@@ -144,6 +176,8 @@ private:
     SDL_GPUGraphicsPipeline* m_linePipeline = nullptr;
     SDL_GPUGraphicsPipeline* m_overlayLinePipeline = nullptr; // lines without depth test
     std::vector<GpuMesh> m_meshes;
+    std::vector<GpuTexture> m_textures;
+    SDL_GPUSampler* m_sampler = nullptr;
 
     struct OverlayLayer {
         std::vector<DebugVertex> lines;

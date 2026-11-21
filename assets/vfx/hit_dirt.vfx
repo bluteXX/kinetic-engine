@@ -1,0 +1,12 @@
+// Blade into packed earth: clumps thrown out and a brown dust cloud.
+{
+  "name": "Dirt hit",
+  "emitters": [
+    { "name": "clumps", "shape": "shard", "count": 14, "color": [0.36, 0.27, 0.17],
+      "size": [0.008, 0.02], "speed": [0.8, 2.5], "spread": 55, "slide": 0.3,
+      "lifetime": [0.5, 0.9], "gravity": 1.0, "drag": 0.4, "spin": 8, "bounce": 0.1 },
+    { "name": "dust", "shape": "puff", "count": 9, "color": [0.55, 0.45, 0.33],
+      "size": [0.025, 0.05], "grow": 3.5, "speed": [0.3, 1.0], "spread": 75,
+      "lifetime": [0.6, 1.0], "gravity": -0.02, "drag": 2.0, "scaleWithSpeed": false }
+  ]
+}

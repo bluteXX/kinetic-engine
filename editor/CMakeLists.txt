@@ -1,10 +1,12 @@
 add_executable(kinetic_editor
     src/main.cpp
     src/AssetDrawer.cpp src/AssetDrawer.h
-    src/AnimationEditor.cpp src/AnimationEditor.h
+    src/AnimationEditor.cpp src/AnimationGraphEditor.cpp src/AnimationEditor.h
     src/SwordStrikeTest.cpp src/SwordStrikeTest.h
     src/CharacterRig.cpp src/CharacterRig.h
-    src/PlayMode.cpp src/PlayMode.h)
+    src/PlayMode.cpp src/PlayMode.h
+    src/CharacterSetup.cpp src/CharacterSetup.h
+    src/ComponentGizmos.cpp src/ComponentGizmos.h)
 # The editor works on the project's own assets/ folder, so meshes added in the Assets drawer land
 # in the repository (not only in the build output). Falls back to <exe>/assets if it is missing.
 target_compile_definitions(kinetic_editor PRIVATE KINETIC_PROJECT_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets")

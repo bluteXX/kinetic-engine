@@ -28,7 +28,9 @@ void destroyEntity(scene::Scene& scene, Renderer& renderer, entt::entity entity)
 //
 // CPU skinning keeps the existing mesh shader working; GPU skinning (joint matrices in a storage
 // buffer, skinned in the vertex shader) is the planned replacement for heavier characters.
-void updateAnimations(scene::Scene& scene, Renderer& renderer, f32 dt);
+// `evaluate` = false: the poses were already evaluated this frame (scene::evaluateAnimatorPoses,
+// e.g. by Play mode before its physics); only overrides, attachments and skinning remain.
+void updateAnimations(scene::Scene& scene, Renderer& renderer, f32 dt, bool evaluate = true);
 
 // Bones of every animated entity as world-space line segments (for Renderer::setOverlayLines).
 // `highlightEntity` / `highlightJoint` select one joint drawn in a different colour.

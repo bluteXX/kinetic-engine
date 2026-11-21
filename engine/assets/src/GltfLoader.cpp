@@ -8,9 +8,11 @@
 #include <glm/gtx/matrix_decompose.hpp>
 
 #include <algorithm>
+#include <filesystem>
 #include <memory>
 #include <numeric>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <unordered_map>
 
@@ -238,6 +240,7 @@ bool appendPrimitive(const cgltf_primitive& primitive, const SkinSkeleton& skin,
     const cgltf_accessor* normals = findAttribute(primitive, cgltf_attribute_type_normal);
     const cgltf_accessor* joints = findAttribute(primitive, cgltf_attribute_type_joints);
     const cgltf_accessor* weights = findAttribute(primitive, cgltf_attribute_type_weights);
+    const cgltf_accessor* texcoords = findAttribute(primitive, cgltf_attribute_type_texcoord);
     if (primitive.type != cgltf_primitive_type_triangles || !positions || !joints || !weights) {
         return false;
     }
@@ -252,6 +255,10 @@ bool appendPrimitive(const cgltf_primitive& primitive, const SkinSkeleton& skin,
         glm::vec3 n(0.0f, 1.0f, 0.0f);
         if (normals) {
             cgltf_accessor_read_float(normals, v, &n.x, 3);
+        }
+        glm::vec2 uv(0.0f);
+        if (texcoords) {
+            cgltf_accessor_read_float(texcoords, v, &uv.x, 2);
         }
         cgltf_uint j[4] = {0, 0, 0, 0};
         cgltf_accessor_read_uint(joints, v, j, 4);
@@ -268,8 +275,36 @@ bool appendPrimitive(const cgltf_primitive& primitive, const SkinSkeleton& skin,
         }
         out.mesh.positions.push_back(p);
         out.mesh.normals.push_back(n);
+        out.mesh.uvs.push_back(uv);
         out.joints.push_back(engineJoints);
         out.weights.push_back(anim::normalizeWeights(w));
+    }
+
+    // Material: the first textured primitive wins (one material per model for now). Embedded
+    // images (buffer views / data URIs) are not supported yet, only files next to the model.
+    if (primitive.material && !out.mesh.material.hasTextures()) {
+        const cgltf_material& m = *primitive.material;
+        const auto uri = [](const cgltf_texture_view& view) -> std::filesystem::path {
+            if (!view.texture || !view.texture->image || !view.texture->image->uri ||
+                std::string_view(view.texture->image->uri).starts_with("data:")) {
+                return {};
+            }
+            std::string decoded = view.texture->image->uri;
+            decoded.resize(cgltf_decode_uri(decoded.data()));
+            return std::filesystem::path(decoded);
+        };
+        MaterialDesc& d = out.mesh.material;
+        d.name = m.name ? m.name : "";
+        if (m.has_pbr_metallic_roughness) {
+            const auto& pbr = m.pbr_metallic_roughness;
+            d.baseColorFactor = glm::vec4(pbr.base_color_factor[0], pbr.base_color_factor[1], pbr.base_color_factor[2],
+                                          pbr.base_color_factor[3]);
+            d.baseColorTexture = uri(pbr.base_color_texture);
+        }
+        d.normalTexture = uri(m.normal_texture);
+        if (m.normal_texture.texture) {
+            d.normalScale = m.normal_texture.scale;
+        }
     }
 
     if (primitive.indices) {

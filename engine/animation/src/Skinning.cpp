@@ -28,10 +28,12 @@ glm::vec4 normalizeWeights(const glm::vec4& weights)
 }
 
 void skinVertices(const SkinnedMesh& skin, std::span<const glm::mat4> skinMatrices, std::span<glm::vec3> outPositions,
-                  std::span<glm::vec3> outNormals)
+                  std::span<glm::vec3> outNormals, std::span<glm::vec4> outTangents)
 {
     const usize n = skin.mesh.positions.size();
     KN_ASSERT(outPositions.size() == n && outNormals.size() == n);
+    const bool tangents = !outTangents.empty() && skin.mesh.hasTangents();
+    KN_ASSERT(!tangents || outTangents.size() == n);
     KN_ASSERT(skin.joints.size() == n && skin.weights.size() == n);
 
     for (usize v = 0; v < n; ++v) {
@@ -54,6 +56,12 @@ void skinVertices(const SkinnedMesh& skin, std::span<const glm::mat4> skinMatric
         const glm::vec3 normal = glm::mat3(m) * skin.mesh.normals[v];
         const f32 length = glm::length(normal);
         outNormals[v] = length > 1e-8f ? normal / length : skin.mesh.normals[v];
+        if (tangents) {
+            const glm::vec4& t = skin.mesh.tangents[v];
+            const glm::vec3 tangent = glm::mat3(m) * glm::vec3(t);
+            const f32 tl = glm::length(tangent);
+            outTangents[v] = tl > 1e-8f ? glm::vec4(tangent / tl, t.w) : t;
+        }
     }
 }
 
@@ -68,8 +76,13 @@ MeshData skinnedRestMesh(const SkinnedModel& model)
     MeshData posed;
     posed.positions.resize(model.skin.mesh.positions.size());
     posed.normals.resize(posed.positions.size());
+    if (model.skin.mesh.hasTangents()) {
+        posed.tangents.resize(posed.positions.size());
+    }
+    posed.uvs = model.skin.mesh.uvs;
     posed.indices = model.skin.mesh.indices;
-    skinVertices(model.skin, skin, posed.positions, posed.normals);
+    posed.material = model.skin.mesh.material;
+    skinVertices(model.skin, skin, posed.positions, posed.normals, posed.tangents);
     return posed;
 }
 

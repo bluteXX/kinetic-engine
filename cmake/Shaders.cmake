@@ -1,7 +1,7 @@
 # Shaders are authored in GLSL (shaders/src) and shipped pre-compiled (shaders/compiled):
 #   *.spv  -> Vulkan (Windows, Linux)
 #   *.msl  -> Metal  (macOS)
-# Regenerate with: python3 tools/compile_shaders.py  (needs glslangValidator + spirv-cross, both in the Vulkan SDK)
+# Regenerate with: python3 tools/compile_shaders.py  (needs glslang (Vulkan SDK or .tools/glslang) + spirv-cross for .msl)
 
 set(KINETIC_SHADER_DIR ${CMAKE_SOURCE_DIR}/shaders/compiled)
 
@@ -16,8 +16,8 @@ else()
 endif()
 
 add_custom_target(kinetic_runtime_files
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${KINETIC_SHADER_DIR} ${KINETIC_RUNTIME_DIR}/shaders
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets ${KINETIC_RUNTIME_DIR}/assets
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different ${KINETIC_SHADER_DIR} ${KINETIC_RUNTIME_DIR}/shaders
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different ${CMAKE_SOURCE_DIR}/assets ${KINETIC_RUNTIME_DIR}/assets
     COMMENT "Copying shaders and assets to ${KINETIC_RUNTIME_DIR}")
 
 # kinetic_copy_shaders(<target>) / kinetic_copy_assets(<target>) — make sure shaders / assets

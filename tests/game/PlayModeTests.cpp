@@ -27,11 +27,13 @@ struct World {
         scene.registry().emplace<scene::CharacterComponent>(hero);
     }
 
-    void addStone(const glm::vec3& center, const glm::vec3& half)
+    void addStone(const glm::vec3& center, const glm::vec3& half,
+                  scene::SurfaceMaterial material = scene::SurfaceMaterial::Stone, const glm::quat& rotation = {1, 0, 0, 0})
     {
-        const entt::entity stone = scene.createEntity("Stone");
+        const entt::entity stone = scene.createEntity("Target");
         scene.registry().get<scene::TransformComponent>(stone).position = center;
-        scene.registry().emplace<scene::ColliderComponent>(stone, half, glm::vec3(0.0f));
+        scene.registry().get<scene::TransformComponent>(stone).rotation = rotation;
+        scene.registry().emplace<scene::ColliderComponent>(stone, half, glm::vec3(0.0f), material);
     }
 
     void run(f32 seconds, editor::PlayInput input = {})
@@ -127,4 +129,89 @@ TEST_CASE("Play: ragdoll collapses onto the floor and stands up again")
     w.run(0.2f);
     CHECK(w.character().mode() == editor::PlayCharacter::Mode::Locomotion);
     CHECK(w.bodyPosition(ch::kPelvis).y == doctest::Approx(0.95f).epsilon(0.05));
+}
+
+namespace {
+
+// One strike at a waist-high target of `material` (the Materials test scene's placement).
+editor::PlayCharacter::Hit strikeAt(scene::SurfaceMaterial material, bool* sawReflexAtImpact = nullptr,
+                                    const glm::quat& rotation = {1, 0, 0, 0}, glm::vec3 center = {-0.21f, 0.45f, 1.0f},
+                                    glm::vec3 half = {0.3f, 0.45f, 0.3f})
+{
+    World w;
+    w.addStone(center, half, material, rotation);
+    w.play.start(w.scene, entt::null);
+    w.run(0.2f);
+    w.run(1.0f / 60.0f, editor::PlayInput{.attack = true});
+    bool reflexAtImpact = false;
+    for (int i = 0; i < 150; ++i) {
+        const usize before = w.character().hits().size();
+        w.run(1.0f / 60.0f);
+        if (before == 0 && !w.character().hits().empty()) {
+            reflexAtImpact = w.character().attackPhase() != editor::PlayCharacter::AttackPhase::Swing;
+        }
+    }
+    if (sawReflexAtImpact) *sawReflexAtImpact = reflexAtImpact;
+    REQUIRE_FALSE(w.character().hits().empty());
+    CHECK(w.character().mode() == editor::PlayCharacter::Mode::Locomotion); // the arm comes back every time
+    return w.character().hits().front();
+}
+
+} // namespace
+
+TEST_CASE("Play: the same strike reacts differently to stone, metal, wood, dirt and flesh")
+{
+    using M = scene::SurfaceMaterial;
+    using R = editor::PlayCharacter::HitResult;
+    std::array<editor::PlayCharacter::Hit, 5> hits;
+    const std::array<M, 5> materials = {M::Stone, M::Metal, M::Wood, M::Dirt, M::Flesh};
+    for (usize i = 0; i < materials.size(); ++i) {
+        hits[i] = strikeAt(materials[i]);
+        const auto& h = hits[i];
+        MESSAGE(std::string(scene::surfaceProperties(materials[i]).name), ": ", std::string(editor::PlayCharacter::resultName(h.result)), ", ",
+                h.speed, " -> ", h.speedAfter, " m/s, angle ", h.angle, " deg, impulse ", h.impulse, " N s, cut ",
+                h.depth * 100.0f, " cm, loads ", h.peakLoad[0], " ", h.peakLoad[1], " ", h.peakLoad[2]);
+        CHECK(h.material == materials[i]);
+        CHECK(h.result != R::Pending);
+        CHECK(h.speed > 1.0f);
+    }
+    const auto& stone = hits[0];
+    const auto& metal = hits[1];
+    const auto& wood = hits[2];
+    const auto& dirt = hits[3];
+    const auto& flesh = hits[4];
+    // Hard: rigid contact, no cut.
+    for (usize i = 0; i < 3; ++i) {
+        CHECK_FALSE(hits[i].soft);
+        CHECK(hits[i].depth < 0.03f);
+    }
+    // Metal is the springiest, wood the deadest.
+    CHECK(metal.speedAfter > stone.speedAfter);
+    CHECK(stone.speedAfter > wood.speedAfter);
+    CHECK(metal.result == R::Rebound);
+    CHECK(stone.result == R::Rebound);
+    CHECK(wood.result == R::Stop);
+    // Soft: the blade cuts in and stays (the muscles then pull it out).
+    for (const auto* h : {&dirt, &flesh}) {
+        CHECK(h->soft);
+        CHECK((h->result == R::Cut || h->result == R::Stuck));
+        CHECK(h->depth > 0.02f);
+    }
+    CHECK(flesh.depth > dirt.depth);
+    CHECK(stone.impulse > 0.5f);
+}
+
+TEST_CASE("Play: the impact angle changes the reaction (stone straight on rebounds, at ~30 deg it stops)")
+{
+    // A stone slab sloping towards the character (top facing it), where the blade comes down and back.
+    const glm::quat slope = glm::angleAxis(glm::radians(-30.0f), glm::vec3(1, 0, 0));
+    const auto slab = strikeAt(scene::SurfaceMaterial::Stone, nullptr, slope, {-0.21f, 0.45f, 1.05f}, {0.3f, 0.06f, 0.6f});
+    const auto straight = strikeAt(scene::SurfaceMaterial::Stone);
+    MESSAGE("slab: ", std::string(editor::PlayCharacter::resultName(slab.result)), ", angle ", slab.angle, " deg, ",
+            slab.speed, " -> ", slab.speedAfter, " m/s; straight: angle ", straight.angle, " deg, -> ", straight.speedAfter);
+    CHECK(slab.material == scene::SurfaceMaterial::Stone);
+    CHECK(slab.angle < 45.0f);
+    CHECK(straight.angle > 70.0f);
+    CHECK(straight.result == editor::PlayCharacter::HitResult::Rebound);
+    CHECK(slab.result != editor::PlayCharacter::HitResult::Rebound);
 }

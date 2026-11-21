@@ -5,8 +5,11 @@ For every shaders/src/<name>.<stage> (stage = vert | frag | comp) produces:
   <name>.<stage>.spv  - SPIR-V for the Vulkan backend (Windows / Linux)
   <name>.<stage>.msl  - Metal Shading Language for the Metal backend (macOS)
 
-Requires glslangValidator and spirv-cross on PATH (both ship with the Vulkan SDK:
-https://vulkan.lunarg.com/). Run from anywhere: python3 tools/compile_shaders.py
+Requires glslang (glslangValidator / glslang) - from the Vulkan SDK (https://vulkan.lunarg.com/),
+on PATH, or unpacked from a glslang release (https://github.com/KhronosGroup/glslang/releases)
+into .tools/glslang/ in the repository. spirv-cross (Vulkan SDK) is needed for the Metal (.msl)
+outputs; without it only SPIR-V is rebuilt and the .msl files are left as they are.
+Run from anywhere: python3 tools/compile_shaders.py
 
 SDL_GPU resource binding rules (keep them in mind when adding uniforms/textures):
 https://wiki.libsdl.org/SDL3/SDL_CreateGPUShader
@@ -30,19 +33,37 @@ def run(cmd: list[str]) -> None:
         sys.exit(f"failed: {' '.join(cmd)}")
 
 
+def find_glslang() -> str | None:
+    for name in ("glslangValidator", "glslang"):
+        if found := shutil.which(name):
+            return found
+    for name in ("glslangValidator", "glslang"):
+        for suffix in ("", ".exe"):
+            local = ROOT / ".tools" / "glslang" / "bin" / f"{name}{suffix}"
+            if local.is_file():
+                return str(local)
+    return None
+
+
 def main() -> None:
-    for tool in ("glslangValidator", "spirv-cross"):
-        if shutil.which(tool) is None:
-            sys.exit(f"{tool} not found on PATH - install the Vulkan SDK")
+    glslang = find_glslang()
+    if glslang is None:
+        sys.exit("glslang not found - install the Vulkan SDK or unpack a glslang release into .tools/glslang")
+    spirv_cross = shutil.which("spirv-cross")
+    if spirv_cross is None:
+        print("warning: spirv-cross not found - Metal (.msl) shaders are NOT updated")
 
     OUT.mkdir(parents=True, exist_ok=True)
     sources = sorted(p for p in SRC.iterdir() if p.suffix.lstrip(".") in STAGES)
     for src in sources:
         spv = OUT / f"{src.name}.spv"
         msl = OUT / f"{src.name}.msl"
-        run(["glslangValidator", "-V", "--target-env", "vulkan1.1", str(src), "-o", str(spv)])
-        run(["spirv-cross", str(spv), "--msl", "--msl-version", "20100", "--output", str(msl)])
-        print(f"  {src.name} -> {spv.name}, {msl.name}")
+        run([glslang, "-V", "--target-env", "vulkan1.1", str(src), "-o", str(spv)])
+        if spirv_cross:
+            run([spirv_cross, str(spv), "--msl", "--msl-version", "20100", "--output", str(msl)])
+            print(f"  {src.name} -> {spv.name}, {msl.name}")
+        else:
+            print(f"  {src.name} -> {spv.name}")
     print(f"compiled {len(sources)} shader(s)")
 
 
